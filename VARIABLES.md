@@ -36,6 +36,18 @@
 | `LOG_FILE` | ❌ | 空 | 日志文件路径（供 `/api/logs` 读取，留空则用平台日志） |
 | `RESTART_WEBHOOK_URL` | ❌ | 空 | 云平台重启回调 URL（供 `/api/restart` 调用） |
 
+### 1.1 🧠 智能体身份（控制 `/v1/chat/completions` 的人格化行为）
+
+仅当配置了 `SUPABASE_URL` 时生效（启用上文注入 + 存库）。不配则纯透传。
+
+| 变量名 | 必填 | 默认值 | 说明 |
+|--------|:---:|--------|------|
+| `USER_NAME` | ❌ | `用户` | 用户称呼，注入到 system 提示与存库记录（如 `张三`） |
+| `AI_NAME` | ❌ | `助手` | AI 角色称呼，注入到 system 提示与存库记录（如 `小橘`） |
+| `USER_ID` | ❌ | `default` | 用户隔离 ID（Mem0 向量记忆按此区分不同用户） |
+| `AI_PERSONA` | ❌ | 空 | AI 人设完整文本，会拼接到 system 提示最前面 |
+| `CHAT_TAG` | ❌ | `Web_Chat` | 存库时给本轮对话打的标签（用于区分网页/TG/QQ 渠道） |
+
 ---
 
 ## 2. 数据库 (Supabase)
