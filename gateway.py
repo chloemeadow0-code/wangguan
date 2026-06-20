@@ -190,30 +190,56 @@ class HostFixMiddleware:
 
             stream = bool(req_data.get("stream", False))
 
+            # 🔧 修复1：构造请求头时加入伪装 User-Agent / Accept / 透传客户端 UA
+            # 解决"直连通、网关不通"的头号嫌疑：上游 WAF/中转站拦截 python-requests 默认 UA
+            client_headers = {k.decode("utf-8", "ignore").lower(): v.decode("utf-8", "ignore") for k, v in scope.get("headers", [])}
+            client_ua = client_headers.get("user-agent", "")
+
+            fwd_headers = {
+                "Authorization": f"Bearer {upstream_key}",
+                "Content-Type": "application/json",
+            }
+            # 优先透传客户端的 UA（最真实）；客户端没带就用浏览器 UA 兜底，绝不用 python-requests 默认值
+            fwd_headers["User-Agent"] = client_ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            fwd_headers["Accept"] = client_headers.get("accept", "application/json")
+            # 透传部分常见无害头（某些服务会校验）
+            for h in ("accept-language", "x-requested-with"):
+                if h in client_headers:
+                    fwd_headers[h] = client_headers[h]
+
             # 同步转发（放到线程池里跑，避免阻塞事件循环）
             def _forward():
                 return requests.post(
                     upstream_url,
-                    headers={
-                        "Authorization": f"Bearer {upstream_key}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=fwd_headers,
                     json=req_data,
                     stream=stream,
                     timeout=300,
                 )
 
+            print(f"➡️  [转发] {method} {upstream_url} | model={req_data.get('model')} | stream={stream} | key={upstream_key[:6]}***")
+
             try:
                 resp = await asyncio.to_thread(_forward)
             except Exception as e:
+                print(f"❌ 上游请求异常: {e}")
                 await _send_json_resp(send, 502, {"error": {"message": f"上游请求失败: {e}", "type": "upstream_error"}})
+                return
+
+            # 🔧 修复2：上游返回非 200 时，打印完整错误信息再决定如何返回
+            if resp.status_code != 200:
+                err_body = resp.text[:1000] if resp.text else "(空响应体)"
+                print(f"❌ 上游返回 {resp.status_code} | URL: {upstream_url}")
+                print(f"   模型: {req_data.get('model')} | Key前6位: {upstream_key[:6]}***")
+                print(f"   上游响应原文: {err_body}")
+                await _send_json_resp(send, resp.status_code, {"error": {"message": err_body, "type": "upstream_error", "upstream_status": resp.status_code}})
                 return
 
             # ---- 流式响应：逐块透传 ----
             if stream:
                 await send({
                     "type": "http.response.start",
-                    "status": resp.status_code,
+                    "status": 200,
                     "headers": [
                         (b"content-type", b"text/event-stream"),
                         (b"cache-control", b"no-cache"),
@@ -235,10 +261,12 @@ class HostFixMiddleware:
             try:
                 data = resp.json()
             except Exception:
-                await _send_json_resp(send, resp.status_code, {"error": {"message": resp.text[:500], "type": "upstream_error"}})
+                err_body = resp.text[:1000] if resp.text else "(空响应体)"
+                print(f"❌ 上游响应非JSON | 状态: {resp.status_code} | 原文: {err_body}")
+                await _send_json_resp(send, resp.status_code, {"error": {"message": err_body, "type": "upstream_error"}})
                 return
 
-            await _send_json_resp(send, resp.status_code, data)
+            await _send_json_resp(send, 200, data)
             return
 
         # 未匹配的 /v1/* 路径

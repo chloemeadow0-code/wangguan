@@ -16,6 +16,14 @@
 import os
 import re
 import json
+
+# 自动加载同目录下的 .env 文件（本地开发用；云端部署由平台注入环境变量）
+# 必须在读取任何 os.environ.get(...) 之前执行，否则 .env 里的密钥不生效。
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 import time
 import uuid
 import base64
