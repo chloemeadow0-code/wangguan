@@ -1,4 +1,4 @@
-"""
+﻿"""
 OrangeChat / 橘瓣记忆库 面板后端 (Panel API)
 =================================================
 提供 6 个 REST 接口，供 HTML 面板访问 Supabase 数据：
@@ -120,16 +120,33 @@ async def handle_get_personas(send):
     if not sb:
         await _send_json_resp(send, 500, {"error": "数据库未连接"})
         return
+    # 内置默认人设（表不存在或查询失败时的兜底）
+    DEFAULT_PERSONAS = [
+        {"id": "默认助手_技术线", "display_name": "默认助手_技术线", "sort_order": 10},
+        {"id": "骆云影_联姻线",   "display_name": "骆云影_联姻线",   "sort_order": 20},
+        {"id": "测试助手",       "display_name": "测试助手",       "sort_order": 30},
+    ]
     try:
         def _q():
             return sb.table("personas").select("id, display_name, sort_order") \
                 .eq("is_visible", True).order("sort_order").execute()
         res = await asyncio.to_thread(_q)
         personas = res.data if res and res.data else []
+        # 如果表里没数据，用默认人设兜底
+        if not personas:
+            personas = DEFAULT_PERSONAS
         await _send_json_resp(send, 200, {"personas": personas})
     except Exception as e:
-        _log(f"❌ [panel] 查询人设失败: {e}")
-        await _send_json_resp(send, 500, {"error": str(e)})
+        err_str = str(e).lower()
+        if "does not exist" in err_str or "42p01" in err_str:
+            _log(f"⚠️ [panel] personas 表不存在，返回内置默认人设（请执行 migration_rebuild_all.sql 建表）")
+            await _send_json_resp(send, 200, {
+                "personas": DEFAULT_PERSONAS,
+                "warning": "personas 表尚未创建，已返回默认人设。请执行 migration_rebuild_all.sql",
+            })
+        else:
+            _log(f"❌ [panel] 查询人设失败: {e}")
+            await _send_json_resp(send, 500, {"error": str(e)})
 
 
 async def handle_get_records(scope, send):
@@ -208,8 +225,22 @@ async def handle_get_records(scope, send):
             "records": rows,
         })
     except Exception as e:
-        _log(f"❌ [panel] 查询记录失败: {e}")
-        await _send_json_resp(send, 500, {"error": str(e)})
+        err_str = str(e).lower()
+        # 表不存在时优雅降级：返回空列表而不是报错
+        if "does not exist" in err_str or "42p01" in err_str:
+            _log(f"⚠️ [panel] 表 {table} 不存在，返回空列表（请先执行 migration_rebuild_all.sql 建表）")
+            await _send_json_resp(send, 200, {
+                "table": table,
+                "page": page,
+                "page_size": page_size,
+                "total": 0,
+                "total_pages": 0,
+                "records": [],
+                "warning": f"表 {table} 尚未创建，请在 Supabase SQL Editor 中执行 migration_rebuild_all.sql",
+            })
+        else:
+            _log(f"❌ [panel] 查询记录失败: {e}")
+            await _send_json_resp(send, 500, {"error": str(e)})
 
 
 async def handle_post_record(scope, receive, send):
