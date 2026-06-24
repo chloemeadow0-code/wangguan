@@ -445,7 +445,7 @@ function renderPager(res) {
 // ==========================================
 function openAddModal() {
   const isMsg = currentTab === 'messages';
-  const personaOpts = personas.map(p => `<option value="${esc(p.id)}">${esc(p.display_name)}</option>`).join('');
+  const personaList = personas.map(p => `<option value="${esc(p.id)}">`).join('');
   let catOpts = '';
   if (isMsg) {
     catOpts = `<label>分类</label><select id="mCategory">
@@ -462,7 +462,8 @@ function openAddModal() {
   document.getElementById('modalContent').innerHTML = `
     <h3>➕ 新增${isMsg?'精华记忆':'对话归档'}</h3>
     <label>人设/线路</label>
-    <select id="mPersona">${personaOpts}</select>
+    <input type="text" id="mPersona" list="personaDatalist" placeholder="输入或选择人设/线路名">
+    <datalist id="personaDatalist">${personaList}</datalist>
     ${catOpts}
     <label>会话ID（可选）</label>
     <input type="text" id="mConvId" placeholder="conversation_id">
@@ -479,7 +480,7 @@ function openEditModal(id) {
   const r = (window._recordsCache || []).find(x => x.id === id);
   if (!r) { toast('记录不存在', 'err'); return; }
   const isMsg = currentTab === 'messages';
-  const personaOpts = personas.map(p => `<option value="${esc(p.id)}" ${p.id===r.assistant_id?'selected':''}>${esc(p.display_name)}</option>`).join('');
+  const personaList = personas.map(p => `<option value="${esc(p.id)}">`).join('');
   let catField = '';
   if (isMsg) {
     catField = `<label>分类</label><select id="mCategory">
@@ -499,7 +500,8 @@ function openEditModal(id) {
   document.getElementById('modalContent').innerHTML = `
     <h3>✏️ 编辑</h3>
     <label>人设/线路</label>
-    <select id="mPersona">${personaOpts}</select>
+    <input type="text" id="mPersona" list="personaDatalist" value="${esc(r.assistant_id||'')}" placeholder="输入或选择人设/线路名">
+    <datalist id="personaDatalist">${personaList}</datalist>
     ${catField}
     <label>会话ID</label>
     <input type="text" id="mConvId" value="${esc(r.conversation_id||'')}">

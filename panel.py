@@ -242,6 +242,26 @@ async def handle_get_records(scope, send):
             await _send_json_resp(send, 500, {"error": str(e)})
 
 
+def _ensure_persona_exists(sb, assistant_id):
+    """如果人设不存在于 personas 表，自动创建一条可见人设"""
+    if not assistant_id:
+        return
+    try:
+        existing = sb.table("personas").select("id").eq("id", assistant_id).limit(1).execute()
+        if existing and existing.data:
+            return  # 已存在
+        # 自动创建
+        sb.table("personas").insert({
+            "id": assistant_id,
+            "display_name": assistant_id,
+            "is_visible": True,
+            "sort_order": 100,
+        }).execute()
+        _log(f"✨ [panel] 自动创建人设: {assistant_id}")
+    except Exception as e:
+        _log(f"⚠️ [panel] 自动创建人设失败({assistant_id}): {e}")
+
+
 async def handle_post_record(scope, receive, send):
     """POST /api/panel/record — 新增一条记录"""
     sb = _get_supabase()
@@ -304,6 +324,7 @@ async def handle_post_record(scope, receive, send):
         row["category"] = data.get("category", "archive")
 
     try:
+        await asyncio.to_thread(lambda: _ensure_persona_exists(sb, assistant_id))
         def _insert():
             return sb.table(table).insert(row).execute()
         res = await asyncio.to_thread(_insert)
@@ -373,6 +394,8 @@ async def handle_patch_record(scope, receive, send):
         return
 
     try:
+        if "assistant_id" in update_fields and update_fields["assistant_id"]:
+            await asyncio.to_thread(lambda: _ensure_persona_exists(sb, update_fields["assistant_id"]))
         def _update():
             return sb.table(table).update(update_fields).eq("id", record_id).execute()
         await asyncio.to_thread(_update)
