@@ -1,22 +1,3 @@
-"""
-通用 ASGI 网关中间件 (Generic ASGI Gateway Middleware)
-======================================================
-特性：
-- 修正反代场景下的 Host 头
-- 统一处理 CORS 预检
-- 🔐 全局 API 安全拦截（校验 API_SECRET，对 /sse /messages /api/* 强制鉴权）
-- 暴露一组管理 / 健康检查 / 配置接口
-- 🧠 OpenAI 兼容代理 (/v1/chat/completions, /v1/models)：
-    * 支持纯透传模式（无 Supabase 时）
-    * 支持智能体模式（配了 Supabase + 可选 Mem0）：
-      自动注入上文（最近N条对话）、人设、用户画像、阶段总结、向量记忆
-    * 流式收集 → 异步双写存库（不阻塞响应）
-- 将业务请求转发给下游 MCP 应用
-
-所有配置从环境变量读取，全部"个人化内容"已变量化，无任何硬编码。
-未配置的功能会优雅降级，保证最小配置（仅 OPENAI_API_KEY）即可运行。
-"""
-
 import os
 import json
 import asyncio
@@ -103,7 +84,7 @@ class HostFixMiddleware:
 
         # ---------- 根路径：返回占位（或前端 index.html）----------
         if scope["path"] == "/":
-            html = "<h1>🚪 MCP Gateway</h1><p>Endpoints: <code>/health</code> <code>/sse</code> <code>/v1/chat/completions</code></p>"
+            html = "<h1>🚪 MCP Gateway</h1><p>Endpoints: <code>/health</code> <code>/sse</code> <code>/v1/chat/completions</code> <code>/panel</code></p>"
             await send({"type": "http.response.start", "status": 200,
                         "headers": [(b"content-type", b"text/html; charset=utf-8")]})
             await send({"type": "http.response.body", "body": html.encode("utf-8")})
@@ -112,6 +93,17 @@ class HostFixMiddleware:
         # ---------- 健康检查 ----------
         if scope["path"] == "/health":
             await _send_json_resp(send, 200, {"status": "ok", "service": "generic-mcp-gateway"})
+            return
+
+        # ---------- 🆕 橘瓣记忆库 HTML 面板 (/panel) ----------
+        # 仅返回 HTML 外壳，不含敏感信息；数据通过 /api/panel/*（需鉴权）获取
+        if scope["path"] == "/panel":
+            try:
+                import panel
+                await panel.handle_panel_html(send)
+            except Exception as e:
+                _log(f"❌ 面板加载失败: {e}")
+                await _send_json_resp(send, 500, {"error": str(e)})
             return
 
         # ---------- 🆕 OpenAI 兼容代理 (/v1/*) ----------
@@ -135,6 +127,16 @@ class HostFixMiddleware:
         # ---------- 运行日志接口 ----------
         if scope["path"] == "/api/logs":
             await self._handle_logs(send)
+            return
+
+        # ---------- 🆕 橘瓣记忆库 Panel API (/api/panel/*) ----------
+        if scope["path"].startswith("/api/panel/"):
+            try:
+                import panel
+                await panel.handle_panel_request(scope, receive, send)
+            except Exception as e:
+                _log(f"❌ Panel API 异常: {e}")
+                await _send_json_resp(send, 500, {"error": str(e)})
             return
 
         # ---------- 兜底其余请求 (Host Fix → 下游 MCP) ----------
@@ -471,7 +473,7 @@ class HostFixMiddleware:
         _log(f"🧠 [智能体] 注入完成：画像{len(user_prof)}字 + 总结{len(core_summaries)}字 + Mem0{len(mem0_context)}字 + 上文{len(history_msgs)}条")
 
     async def _save_conversation(self, sb, user_msg, ai_msg, reasoning, tool_calls):
-        """异步把本轮对话存到 Supabase memories 表 + Mem0"""
+        """异步把本轮对话存到 Supabase memories 表 + Mem0 + 橘瓣 chat_archive"""
         ai_name = os.environ.get("AI_NAME", "助手")
         user_name = os.environ.get("USER_NAME", "用户")
         user_id = os.environ.get("USER_ID", "default")
@@ -526,7 +528,42 @@ class HostFixMiddleware:
             except Exception as e:
                 _log(f"Mem0 写入失败: {e}")
 
-        # 3. 🧠 异步触发全渠道统一对话总结（不阻塞响应）
+        # 3. 🍊 橘瓣记忆库自动归档：把本轮对话原文写入 chat_archive
+        #    按人设/线路隔离；assistant_id 由环境变量或 chat_tag 推断
+        try:
+            oc_assistant_id = os.environ.get("ORANGECHAT_ASSISTANT_ID", "").strip()
+            if not oc_assistant_id:
+                oc_assistant_id = chat_tag or "默认助手_技术线"
+            now_iso = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).isoformat()
+
+            def _archive_user():
+                sb.table("chat_archive").insert({
+                    "assistant_id": oc_assistant_id,
+                    "conversation_id": "",
+                    "role": "user",
+                    "content": user_msg[:4000],
+                    "category": "archive",
+                    "created_at": now_iso,
+                }).execute()
+
+            def _archive_ai():
+                sb.table("chat_archive").insert({
+                    "assistant_id": oc_assistant_id,
+                    "conversation_id": "",
+                    "role": "assistant",
+                    "content": final_save_text[:4000],
+                    "category": "archive",
+                    "created_at": now_iso,
+                }).execute()
+
+            await asyncio.to_thread(_archive_user)
+            if final_save_text:
+                await asyncio.to_thread(_archive_ai)
+            _log(f"🍊 [归档] 已写入 chat_archive [{oc_assistant_id}]: user({len(user_msg)}字) + assistant({len(final_save_text)}字)")
+        except Exception as e:
+            _log(f"⚠️ 橘瓣自动归档失败（不影响主流程）: {e}")
+
+        # 4. 🧠 异步触发全渠道统一对话总结（不阻塞响应）
         #    监控网页/QQ/TG/邮件等所有渠道的对话流水，
         #    累计达到 SUMMARY_THRESHOLD（默认30条）时自动总结归档。
         try:
@@ -575,7 +612,7 @@ async def _send_json_resp(send, status: int, data: dict):
             (b"content-type", b"application/json; charset=utf-8"),
             (b"access-control-allow-origin", b"*"),
             (b"access-control-allow-methods", b"GET, POST, OPTIONS"),
-            (b"access-control-allow-headers", b"Content-Type, Authorization"),
+            (b"access-control-allow-headers", b"Content-Type, Authorization, x-api-key"),
         ]
     })
     await send({"type": "http.response.body", "body": body})
@@ -587,8 +624,8 @@ async def _send_cors_preflight(send):
         "status": 204,
         "headers": [
             (b"access-control-allow-origin", b"*"),
-            (b"access-control-allow-methods", b"GET, POST, OPTIONS"),
-            (b"access-control-allow-headers", b"Content-Type, Authorization"),
+            (b"access-control-allow-methods", b"GET, POST, PATCH, DELETE, OPTIONS"),
+            (b"access-control-allow-headers", b"Content-Type, Authorization, x-api-key"),
             (b"access-control-max-age", b"86400"),
         ]
     })

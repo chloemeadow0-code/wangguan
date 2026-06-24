@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>🍊 橘瓣记忆库 · 甜蜜管理面板</title>
+<style>
+  :root {
+    /* 甜蜜配色：奶油粉 + 蜜桃 + 薰衣草 */
+    --bg-1: #fff5f7; --bg-2: #ffe8ee; --bg-3: #f3e8ff;
+    --card: rgba(255, 255, 255, 0.72);
+    --card-solid: #ffffff;
+    --border: rgba(255, 182, 193, 0.45);
+    --text: #5a4a52; --text-soft: #9b8a93; --muted: #c4b5bd;
+    --accent: #ff7eb3; --accent-2: #ff9a8b; --accent-grad: linear-gradient(135deg, #ff9a8b 0%, #ff6a88 50%, #ff99ac 100%);
+    --accent-soft: rgba(255, 126, 179, 0.12);
+    --danger: #ff6b81; --ok: #6bcb77; --warn: #ffa45c;
+    /* 标签糖果色 */
+    --tag-rel: #ff6b9d; --tag-plot: #c084fc; --tag-like: #4ade80;
+    --tag-hate: #f87171; --tag-set: #60a5fa; --tag-doc: #fbbf24;
+    --radius: 16px; --radius-sm: 10px;
+    --shadow: 0 8px 32px rgba(255, 126, 179, 0.15), 0 2px 8px rgba(192, 132, 252, 0.08);
+    --shadow-soft: 0 4px 16px rgba(255, 126, 179, 0.1);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+    background: linear-gradient(160deg, var(--bg-1) 0%, var(--bg-2) 40%, var(--bg-3) 100%);
+    background-attachment: fixed; color: var(--text); font-size: 14px; line-height: 1.6; min-height: 100vh; }
+  .hidden { display: none !important; }
+
+  /* 顶栏 — 毛玻璃 */
+  header { position: sticky; top: 0; z-index: 100;
+    background: var(--card); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border); padding: 12px 16px;
+    box-shadow: var(--shadow-soft); }
+  .header-row { display: flex; align-items: center; gap: 10px; }
+  .header-row h1 { font-size: 18px; margin: 0; background: var(--accent-grad);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; font-weight: 800; flex: 1; }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 8px rgba(0,0,0,0.1); }
+  .status-dot.ok { background: var(--ok); box-shadow: 0 0 8px rgba(107,203,119,0.5); }
+  .status-dot.err { background: var(--danger); box-shadow: 0 0 8px rgba(255,107,129,0.5); }
+
+  /* 连接区 */
+  .connect { padding: 24px 16px; }
+  .connect-card { background: var(--card); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 24px 20px; box-shadow: var(--shadow); }
+  .connect-card .title { font-size: 20px; font-weight: 800; background: var(--accent-grad);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 4px; }
+  .connect-card .desc { font-size: 13px; color: var(--text-soft); margin-bottom: 16px; }
+  .connect input { width: 100%; padding: 12px 16px; background: rgba(255,255,255,0.6);
+    border: 1.5px solid var(--border); border-radius: var(--radius-sm); color: var(--text);
+    font-size: 15px; transition: all 0.2s; margin-bottom: 12px; }
+  .connect input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+
+  /* 按钮 */
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    padding: 10px 20px; border: none; border-radius: var(--radius-sm); font-size: 14px; font-weight: 600;
+    cursor: pointer; background: rgba(255,255,255,0.7); color: var(--text);
+    border: 1.5px solid var(--border); transition: all 0.2s; }
+  .btn:active { transform: scale(0.96); }
+  .btn-primary { background: var(--accent-grad); color: #fff; border: none;
+    box-shadow: 0 4px 12px rgba(255,106,136,0.3); }
+  .btn-primary:active { box-shadow: 0 2px 6px rgba(255,106,136,0.3); }
+  .btn-danger { background: linear-gradient(135deg, #ff8a80, #ff5252); color: #fff; border: none; }
+  .btn-sm { padding: 6px 14px; font-size: 12px; border-radius: 8px; }
+
+  /* Tabs — 胶囊 */
+  .tabs { display: flex; gap: 6px; padding: 12px 16px 6px; }
+  .tab { flex: 1; padding: 10px 14px; text-align: center; cursor: pointer;
+    border-radius: 12px; color: var(--text-soft); font-weight: 600; font-size: 13px;
+    background: rgba(255,255,255,0.4); border: 1.5px solid transparent; transition: all 0.2s; }
+  .tab.active { color: #fff; background: var(--accent-grad); border-color: transparent;
+    box-shadow: 0 4px 12px rgba(255,106,136,0.25); }
+
+  /* 筛选栏 */
+  .filters { padding: 8px 16px 12px; display: grid; gap: 8px; }
+  .filter-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  select, .filters input { padding: 9px 12px; background: rgba(255,255,255,0.6);
+    border: 1.5px solid var(--border); border-radius: var(--radius-sm); color: var(--text);
+    font-size: 13px; transition: all 0.2s; }
+  select:focus, .filters input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  select { flex: 1; min-width: 0; }
+  .filters input { flex: 1; min-width: 0; }
+
+  /* 列表卡片 */
+  .list { padding: 4px 16px 100px; }
+  .item { background: var(--card); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px;
+    margin-bottom: 10px; box-shadow: var(--shadow-soft); transition: all 0.2s; }
+  .item:active { transform: scale(0.99); }
+  .item-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+  .tag { display: inline-block; padding: 3px 12px; border-radius: 20px; font-size: 11px;
+    font-weight: 700; color: #fff; letter-spacing: 0.5px; }
+  .tag-关系 { background: var(--tag-rel); } .tag-剧情 { background: var(--tag-plot); }
+  .tag-喜好 { background: var(--tag-like); } .tag-雷点 { background: var(--tag-hate); }
+  .tag-设定 { background: var(--tag-set); } .tag-档案 { background: var(--tag-doc); }
+  .role-tag { padding: 3px 12px; border-radius: 20px; font-size: 11px; font-weight: 700; }
+  .role-user { background: rgba(96,165,250,0.18); color: #3b82f6; }
+  .role-assistant { background: rgba(192,132,252,0.18); color: #a855f7; }
+  .role-system { background: rgba(251,191,36,0.18); color: #d97706; }
+  .item-time { font-size: 11px; color: var(--muted); margin-left: auto; }
+  .item-content { white-space: pre-wrap; word-break: break-word; color: var(--text); font-size: 14px; line-height: 1.65; }
+  .item-content.clamp { max-height: 5em; overflow: hidden; position: relative; }
+  .item-content.clamp::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 1.5em;
+    background: linear-gradient(transparent, rgba(255,255,255,0.85)); pointer-events: none; }
+  .item-actions { display: flex; gap: 6px; margin-top: 10px; }
+  .expand-btn { color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; user-select: none; margin-top: 6px; }
+
+  /* 分页 */
+  .pager { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 12px; flex-wrap: wrap; }
+  .pager .info { font-size: 12px; color: var(--text-soft); width: 100%; text-align: center; margin-bottom: 6px; }
+  .pager input[type=number] { width: 56px; padding: 5px 8px; text-align: center; border-radius: 8px;
+    border: 1.5px solid var(--border); background: rgba(255,255,255,0.6); color: var(--text); font-size: 13px; }
+
+  /* FAB 浮动按钮 */
+  .fab { position: fixed; right: 20px; bottom: 24px; width: 56px; height: 56px; border-radius: 50%;
+    background: var(--accent-grad); color: #fff; border: none; font-size: 30px; cursor: pointer;
+    box-shadow: 0 8px 24px rgba(255,106,136,0.4); z-index: 90; transition: all 0.2s; }
+  .fab:active { transform: scale(0.9); }
+
+  /* 模态框 */
+  .modal-mask { position: fixed; inset: 0; background: rgba(90, 74, 82, 0.35); backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px); display: flex; align-items: flex-end; justify-content: center; z-index: 200; }
+  .modal { background: var(--card-solid); width: 100%; max-width: 560px;
+    border-radius: 24px 24px 0 0; padding: 20px; max-height: 90vh; overflow-y: auto;
+    box-shadow: 0 -8px 40px rgba(255,106,136,0.2); animation: slideUp 0.3s ease; }
+  @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+  .modal h3 { margin: 0 0 16px; font-size: 18px; font-weight: 800; color: var(--accent); }
+  .modal label { display: block; font-size: 12px; font-weight: 600; color: var(--text-soft); margin: 12px 0 6px; }
+  .modal input, .modal textarea, .modal select { width: 100%; padding: 10px 14px;
+    background: rgba(255,245,247,0.6); border: 1.5px solid var(--border); border-radius: var(--radius-sm);
+    color: var(--text); font-size: 14px; font-family: inherit; transition: all 0.2s; }
+  .modal input:focus, .modal textarea:focus, .modal select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .modal textarea { min-height: 110px; resize: vertical; }
+  .modal-actions { display: flex; gap: 10px; margin-top: 20px; }
+  .modal-actions .btn { flex: 1; padding: 12px; }
+
+  /* Toast */
+  #toast { position: fixed; bottom: 92px; left: 50%; transform: translateX(-50%);
+    background: var(--card-solid); color: var(--text); padding: 12px 20px; border-radius: 24px;
+    font-size: 13px; font-weight: 600; z-index: 300; opacity: 0; transition: all 0.3s; pointer-events: none;
+    box-shadow: var(--shadow); max-width: 90%; }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(-4px); }
+  #toast.err { background: linear-gradient(135deg, #ff8a80, #ff5252); color: #fff; }
+  #toast.ok { background: linear-gradient(135deg, #81c784, #4caf50); color: #fff; }
+
+  .empty { text-align: center; color: var(--text-soft); padding: 60px 20px; font-size: 14px; }
+  .empty .emoji { font-size: 48px; display: block; margin-bottom: 12px; opacity: 0.6; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-row">
+    <h1>🍊 橘瓣记忆库</h1>
+    <span class="status-dot" id="statusDot"></span>
+    <span style="font-size:12px;color:var(--text-soft);font-weight:600" id="statusText">未连接</span>
+  </div>
+</header>
+
+<!-- 连接区 -->
+<div class="connect" id="connectSection">
+  <div class="connect-card">
+    <div class="title">✨ 欢迎回来</div>
+    <div class="desc">填入 API_SECRET 即可连接，无需 Supabase Key 🌸</div>
+    <input type="password" id="apiKey" placeholder="🔑 API_SECRET，如 lyy123" autocomplete="off">
+    <button class="btn btn-primary" style="width:100%" onclick="connect()">🎀 连接</button>
+  </div>
+</div>
+
+<!-- 主面板（连接后显示） -->
+<div id="mainPanel" class="hidden">
+  <div class="tabs">
+    <div class="tab active" data-tab="messages" onclick="switchTab('messages')">🧠 精华记忆</div>
+    <div class="tab" data-tab="archive" onclick="switchTab('archive')">📜 对话归档</div>
+  </div>
+
+  <!-- 筛选栏 -->
+  <div class="filters" id="filterBar">
+    <div class="filter-row">
+      <select id="fPersona"><option value="">👥 所有人设</option></select>
+    </div>
+    <div class="filter-row" id="catFilterRow">
+      <select id="fCategory">
+        <option value="">🏷️ 全部分类</option>
+        <option value="关系">💕 [关系]</option>
+        <option value="剧情">📖 [剧情]</option>
+        <option value="喜好">💚 [喜好]</option>
+        <option value="雷点">🚫 [雷点]</option>
+        <option value="设定">⚙️ [设定]</option>
+        <option value="档案">📁 [档案]</option>
+      </select>
+    </div>
+    <div class="filter-row" id="roleFilterRow" class="hidden">
+      <select id="fRole">
+        <option value="">🎭 全部角色</option>
+        <option value="user">user</option>
+        <option value="assistant">assistant</option>
+        <option value="system">system</option>
+      </select>
+    </div>
+    <div class="filter-row">
+      <input type="text" id="fKeyword" placeholder="🔍 关键词搜索..." onkeydown="if(event.key==='Enter')loadList(1)">
+      <button class="btn btn-sm btn-primary" onclick="loadList(1)">搜索</button>
+    </div>
+    <div class="filter-row">
+      <label style="font-size:12px;color:var(--text-soft);font-weight:600">每页</label>
+      <select id="fPageSize" onchange="loadList(1)" style="flex:0 0 auto">
+        <option id="opt1"></option>
+        <option id="opt2"></option>
+      </select>
+    </div>
+  </div>
+
+  <!-- 列表 -->
+  <div class="list" id="listArea"></div>
+
+  <!-- 分页 -->
+  <div class="pager" id="pager"></div>
+</div>
+
+<button class="fab hidden" id="fabAdd" onclick="openAddModal()">+</button>
+
+<!-- 模态框 -->
+<div class="modal-mask hidden" id="modalMask" onclick="if(event.target===this)closeModal()">
+  <div class="modal" id="modalContent"></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+let API_KEY = localStorage.getItem('panel_api_key') || '';
+let currentTab = 'messages';
+let currentPage = 1;
+let personas = [];
+
+// ==========================================
+// 工具函数
+// ==========================================
+function toast(msg, type='') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'show ' + type;
+  setTimeout(() => t.className = '', 2500);
+}
+
+function esc(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/&/g,'&').replace(/</g,'<').replace(/>/g,'>').replace(/"/g,'"');
+}
+
+function fmtTime(t) {
+  if (!t) return '';
+  try {
+    const d = new Date(t);
+    if (isNaN(d)) return t.slice(0,16);
+    return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+
+      String(d.getDate()).padStart(2,'0')+' '+String(d.getHours()).padStart(2,'0')+':'+
+      String(d.getMinutes()).padStart(2,'0');
+  } catch(e) { return t; }
+}
+
+async function api(path, method='GET', body=null) {
+  const opts = { method, headers: { 'x-api-key': API_KEY, 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(path, opts);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || ('HTTP '+res.status));
+  return data;
+}
+
+// ==========================================
+// 连接
+// ==========================================
+async function connect() {
+  const k = document.getElementById('apiKey').value.trim();
+  if (!k) { toast('请填入 API_SECRET', 'err'); return; }
+  API_KEY = k;
+  localStorage.setItem('panel_api_key', k);
+  try {
+    const res = await api('/api/panel/personas');
+    personas = res.personas || [];
+    document.getElementById('statusDot').className = 'status-dot ok';
+    document.getElementById('statusText').textContent = '已连接';
+    document.getElementById('connectSection').classList.add('hidden');
+    document.getElementById('mainPanel').classList.remove('hidden');
+    document.getElementById('fabAdd').classList.remove('hidden');
+    const sel = document.getElementById('fPersona');
+    sel.innerHTML = '<option value="">👥 所有人设</option>' +
+      personas.map(p => `<option value="${esc(p.id)}">${esc(p.display_name)}</option>`).join('');
+    setupPageSizeOptions();
+    loadList(1);
+    toast('连接成功 🌸', 'ok');
+  } catch(e) {
+    document.getElementById('statusDot').className = 'status-dot err';
+    document.getElementById('statusText').textContent = '连接失败';
+    toast('连接失败: '+e.message, 'err');
+    API_KEY = '';
+    localStorage.removeItem('panel_api_key');
+  }
+}
+
+// ==========================================
+// Tab 切换
+// ==========================================
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  const isMsg = tab === 'messages';
+  document.getElementById('catFilterRow').style.display = isMsg ? '' : 'none';
+  document.getElementById('roleFilterRow').style.display = isMsg ? 'none' : '';
+  setupPageSizeOptions();
+  loadList(1);
+}
+
+function setupPageSizeOptions() {
+  const o1 = document.getElementById('opt1');
+  const o2 = document.getElementById('opt2');
+  if (currentTab === 'messages') {
+    o1.value = '20'; o1.textContent = '20';
+    o2.value = '50'; o2.textContent = '50';
+    if (!o2.selected && !o1.selected) o1.selected = true;
+  } else {
+    o1.value = '5'; o1.textContent = '5';
+    o2.value = '10'; o2.textContent = '10';
+    if (!o2.selected && !o1.selected) o1.selected = true;
+  }
+}
+
+function currentTable() { return currentTab === 'messages' ? 'chat_messages' : 'chat_archive'; }
+
+// ==========================================
+// 列表加载
+// ==========================================
+async function loadList(page) {
+  currentPage = page || 1;
+  const table = currentTable();
+  const params = new URLSearchParams();
+  params.set('table', table);
+  const pid = document.getElementById('fPersona').value;
+  if (pid) params.set('assistant_id', pid);
+  const kw = document.getElementById('fKeyword').value.trim();
+  if (kw) params.set('keyword', kw);
+  if (currentTab === 'messages') {
+    const cat = document.getElementById('fCategory').value;
+    if (cat) params.set('category', cat);
+  } else {
+    const role = document.getElementById('fRole').value;
+    if (role) params.set('role', role);
+  }
+  params.set('page', currentPage);
+  params.set('page_size', document.getElementById('fPageSize').value);
+
+  const area = document.getElementById('listArea');
+  area.innerHTML = '<div class="empty"><span class="emoji">⏳</span>加载中...</div>';
+  try {
+    const res = await api('/api/panel/records?'+params.toString());
+    renderList(res);
+    renderPager(res);
+  } catch(e) {
+    area.innerHTML = '<div class="empty"><span class="emoji">😢</span>'+esc(e.message)+'</div>';
+    document.getElementById('pager').innerHTML = '';
+  }
+}
+
+function renderList(res) {
+  const area = document.getElementById('listArea');
+  const records = res.records || [];
+  if (records.length === 0) {
+    area.innerHTML = '<div class="empty"><span class="emoji">🌸</span>暂无数据</div>';
+    return;
+  }
+  area.innerHTML = records.map(r => {
+    const isMsg = currentTab === 'messages';
+    let head = '';
+    if (isMsg && r.category) {
+      head += `<span class="tag tag-${esc(r.category)}">${esc(r.category)}</span>`;
+    }
+    if (!isMsg && r.role) {
+      head += `<span class="role-tag role-${esc(r.role)}">${esc(r.role)}</span>`;
+    }
+    head += `<span class="item-time">${esc(fmtTime(r.created_at))}</span>`;
+    const isLong = (r.content || '').length > 120;
+    const cls = isLong ? 'item-content clamp' : 'item-content';
+    let html = `<div class="item">
+      <div class="item-head">${head}</div>
+      <div class="${cls}" id="content-${esc(r.id)}">${esc(r.content)}</div>`;
+    if (isLong) {
+      html += `<div class="expand-btn" onclick="toggleExpand('${esc(r.id)}')">展开 ▼</div>`;
+    }
+    html += `<div class="item-actions">
+      <button class="btn btn-sm" onclick="openEditModal('${esc(r.id)}')">✏️ 编辑</button>
+      <button class="btn btn-sm btn-danger" onclick="delRecord('${esc(r.id)}')">🗑️ 删除</button>
+    </div></div>`;
+    return html;
+  }).join('');
+  window._recordsCache = records;
+}
+
+function toggleExpand(id) {
+  const el = document.getElementById('content-'+id);
+  const btn = el.nextElementSibling;
+  if (el.classList.contains('clamp')) {
+    el.classList.remove('clamp');
+    btn.textContent = '收起 ▲';
+  } else {
+    el.classList.add('clamp');
+    btn.textContent = '展开 ▼';
+  }
+}
+
+function renderPager(res) {
+  const p = document.getElementById('pager');
+  const total = res.total || 0;
+  const tp = res.total_pages || 0;
+  const page = res.page || 1;
+  p.innerHTML = `<div class="info">共 ${total} 条，第 ${page}/${tp||1} 页</div>`;
+  if (tp <= 1) return;
+  const maxBtns = 7;
+  let start = Math.max(1, page - 3);
+  let end = Math.min(tp, start + maxBtns - 1);
+  start = Math.max(1, end - maxBtns + 1);
+  let btns = '';
+  if (page > 1) btns += `<button class="btn btn-sm" onclick="loadList(${page-1})">‹</button>`;
+  for (let i = start; i <= end; i++) {
+    btns += `<button class="btn btn-sm ${i===page?'btn-primary':''}" onclick="loadList(${i})">${i}</button>`;
+  }
+  if (page < tp) btns += `<button class="btn btn-sm" onclick="loadList(${page+1})">›</button>`;
+  p.innerHTML += btns;
+  p.innerHTML += `<input type="number" min="1" max="${tp}" value="${page}" style="width:60px"
+    onchange="loadList(parseInt(this.value))" placeholder="跳转">`;
+}
+
+// ==========================================
+// 新增 / 编辑
+// ==========================================
+function openAddModal() {
+  const isMsg = currentTab === 'messages';
+  const personaOpts = personas.map(p => `<option value="${esc(p.id)}">${esc(p.display_name)}</option>`).join('');
+  let catOpts = '';
+  if (isMsg) {
+    catOpts = `<label>分类</label><select id="mCategory">
+      <option value="关系">💕 [关系]</option><option value="剧情">📖 [剧情]</option>
+      <option value="喜好">💚 [喜好]</option><option value="雷点">🚫 [雷点]</option>
+      <option value="设定">⚙️ [设定]</option><option value="档案">📁 [档案]</option>
+    </select>`;
+  } else {
+    catOpts = `<label>角色</label><select id="mRole">
+      <option value="user">user</option><option value="assistant">assistant</option>
+      <option value="system">system</option></select>`;
+  }
+  const ph = isMsg ? '如 [关系] 骆云影和函函是联姻关系' : '对话原文';
+  document.getElementById('modalContent').innerHTML = `
+    <h3>➕ 新增${isMsg?'精华记忆':'对话归档'}</h3>
+    <label>人设/线路</label>
+    <select id="mPersona">${personaOpts}</select>
+    ${catOpts}
+    <label>会话ID（可选）</label>
+    <input type="text" id="mConvId" placeholder="conversation_id">
+    <label>内容</label>
+    <textarea id="mContent" placeholder="${ph}"></textarea>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitAdd()">💾 保存</button>
+    </div>`;
+  document.getElementById('modalMask').classList.remove('hidden');
+}
+
+function openEditModal(id) {
+  const r = (window._recordsCache || []).find(x => x.id === id);
+  if (!r) { toast('记录不存在', 'err'); return; }
+  const isMsg = currentTab === 'messages';
+  const personaOpts = personas.map(p => `<option value="${esc(p.id)}" ${p.id===r.assistant_id?'selected':''}>${esc(p.display_name)}</option>`).join('');
+  let catField = '';
+  if (isMsg) {
+    catField = `<label>分类</label><select id="mCategory">
+      <option value="关系" ${r.category==='关系'?'selected':''}>💕 [关系]</option>
+      <option value="剧情" ${r.category==='剧情'?'selected':''}>📖 [剧情]</option>
+      <option value="喜好" ${r.category==='喜好'?'selected':''}>💚 [喜好]</option>
+      <option value="雷点" ${r.category==='雷点'?'selected':''}>🚫 [雷点]</option>
+      <option value="设定" ${r.category==='设定'?'selected':''}>⚙️ [设定]</option>
+      <option value="档案" ${r.category==='档案'?'selected':''}>📁 [档案]</option>
+    </select>`;
+  } else {
+    catField = `<label>角色</label><select id="mRole">
+      <option value="user" ${r.role==='user'?'selected':''}>user</option>
+      <option value="assistant" ${r.role==='assistant'?'selected':''}>assistant</option>
+      <option value="system" ${r.role==='system'?'selected':''}>system</option></select>`;
+  }
+  document.getElementById('modalContent').innerHTML = `
+    <h3>✏️ 编辑</h3>
+    <label>人设/线路</label>
+    <select id="mPersona">${personaOpts}</select>
+    ${catField}
+    <label>会话ID</label>
+    <input type="text" id="mConvId" value="${esc(r.conversation_id||'')}">
+    <label>内容</label>
+    <textarea id="mContent">${esc(r.content)}</textarea>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitEdit('${esc(id)}')">💾 保存</button>
+    </div>`;
+  document.getElementById('modalMask').classList.remove('hidden');
+}
+
+async function submitAdd() {
+  const body = { table: currentTable(), content: document.getElementById('mContent').value.trim() };
+  body.assistant_id = document.getElementById('mPersona').value;
+  body.conversation_id = document.getElementById('mConvId').value.trim();
+  if (currentTab === 'messages') {
+    body.category = document.getElementById('mCategory').value;
+  } else {
+    body.role = document.getElementById('mRole').value;
+  }
+  try {
+    await api('/api/panel/record', 'POST', body);
+    toast('新增成功 🌸', 'ok');
+    closeModal();
+    loadList(currentPage);
+  } catch(e) { toast('新增失败: '+e.message, 'err'); }
+}
+
+async function submitEdit(id) {
+  const body = { table: currentTable(), id };
+  body.content = document.getElementById('mContent').value.trim();
+  body.assistant_id = document.getElementById('mPersona').value;
+  body.conversation_id = document.getElementById('mConvId').value.trim();
+  if (currentTab === 'messages') {
+    body.category = document.getElementById('mCategory').value;
+  } else {
+    body.role = document.getElementById('mRole').value;
+  }
+  try {
+    await api('/api/panel/record', 'PATCH', body);
+    toast('已保存 💕', 'ok');
+    closeModal();
+    loadList(currentPage);
+  } catch(e) { toast('保存失败: '+e.message, 'err'); }
+}
+
+async function delRecord(id) {
+  if (!confirm('确认删除？此操作不可恢复。')) return;
+  try {
+    await api('/api/panel/record', 'DELETE', { table: currentTable(), id });
+    toast('已删除 🗑️', 'ok');
+    loadList(currentPage);
+  } catch(e) { toast('删除失败: '+e.message, 'err'); }
+}
+
+function closeModal() { document.getElementById('modalMask').classList.add('hidden'); }
+
+if (API_KEY) { document.getElementById('apiKey').value = API_KEY; }
+</script>
+</body>
+</html>

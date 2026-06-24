@@ -1316,6 +1316,147 @@ async def cover_existing_song(song_url: str):
 
 
 # ==========================================
+# 3.5 OrangeChat / 橘瓣记忆库工具 (按 assistant_id 隔离)
+# ==========================================
+# 这些工具配合 chat_messages / chat_archive / personas / persona_map 四张表使用
+# 建表脚本见 supabase_schema.sql
+# 设计要点：
+# - 记忆按 assistant_id（人设/线路名）隔离
+# - conversation_id 仅记录来源，不作为隔离边界
+# - chat_messages 的 content 必须以 [标签] 开头
+
+_ORANGECHAT_CATEGORIES = ["关系", "剧情", "喜好", "雷点", "设定", "档案"]
+
+
+@mcp.tool()
+@mcp_error_handler
+async def memory_write(assistant_id: str, content: str, category: str = "", conversation_id: str = ""):
+    """
+    【写入精华记忆】把一条原子事实写入 chat_messages 表（按 assistant_id 隔离）。
+    - assistant_id: 人设/线路名，如 骆云影_联姻线 / 默认助手_技术线
+    - content: 必须以 [标签] 开头，如 [关系] 骆云影和函函是联姻关系
+              若未带标签但给了 category，会自动补 [category] 前缀。
+    - category: 关系/剧情/喜好/雷点/设定/档案（可留空，从 content 标签自动推断）
+    - conversation_id: 来源会话标记（可选，仅记录不隔离）
+
+    人名规则：角色线必须写真实角色名（如 函函/骆云影/秦梧），
+              无设定助手线可用 用户/助手。不要写 他/她/你/我 等模糊代词。
+    """
+    if not supabase:
+        return "❌ 数据库未连接"
+    if not assistant_id or not content:
+        return "❌ assistant_id 和 content 不能为空"
+
+    content = content.strip()
+    # 校验/补全标签
+    has_tag = any(content.startswith(f"[{c}]") for c in _ORANGECHAT_CATEGORIES)
+    if not has_tag:
+        if category and category in _ORANGECHAT_CATEGORIES:
+            content = f"[{category}] {content}"
+        else:
+            return f"❌ content 必须以标签开头，如 [关系]/[剧情]/[喜好]/[雷点]/[设定]/[档案]"
+
+    # 若未显式给 category，从标签推断
+    if not category:
+        for c in _ORANGECHAT_CATEGORIES:
+            if content.startswith(f"[{c}]"):
+                category = c
+                break
+
+    row = {
+        "assistant_id": assistant_id.strip(),
+        "conversation_id": (conversation_id or "").strip(),
+        "content": content,
+        "category": category,
+        "role": "assistant",
+    }
+
+    def _insert():
+        return supabase.table("chat_messages").insert(row).execute()
+    await asyncio.to_thread(_insert)
+    return f"✅ 精华记忆已写入 [{assistant_id}]: {content[:80]}"
+
+
+@mcp.tool()
+@mcp_error_handler
+async def archive_write(assistant_id: str, role: str, content: str, conversation_id: str = ""):
+    """
+    【归档对话原文】把一轮对话的原文写入 chat_archive 表（按 assistant_id 归档）。
+    - assistant_id: 人设/线路名
+    - role: user / assistant / system
+    - content: 对话原文
+    - conversation_id: 会话标记（可选）
+
+    一轮对话通常调用两次：一次 role=user，一次 role=assistant。
+    """
+    if not supabase:
+        return "❌ 数据库未连接"
+    if not assistant_id or not content:
+        return "❌ assistant_id 和 content 不能为空"
+    if role not in ("user", "assistant", "system"):
+        role = "user"
+
+    row = {
+        "assistant_id": assistant_id.strip(),
+        "conversation_id": (conversation_id or "").strip(),
+        "role": role,
+        "content": content.strip(),
+        "category": "archive",
+    }
+
+    def _insert():
+        return supabase.table("chat_archive").insert(row).execute()
+    await asyncio.to_thread(_insert)
+    return f"✅ 归档已写入 [{assistant_id}/{role}]: {content[:60]}"
+
+
+@mcp.tool()
+@mcp_error_handler
+async def memory_search_v2(persona_name: str, query: str, limit: int = 10):
+    """
+    【检索精华记忆】按人设/线路在 chat_messages 中关键词检索（按 assistant_id 隔离）。
+    - persona_name: 人设/线路名（即 assistant_id），如 骆云影_联姻线
+    - query: 检索关键词或问题
+    - limit: 返回条数上限（默认 10）
+
+    注意：当前为关键词检索版本（ilike 模糊匹配）。
+    第五阶段将升级为「关键词 + 向量(bge-m3)」混合检索，
+    但始终按 assistant_id 过滤，防止人设串线。
+
+    返回的每条记忆都是 [标签] 开头的原子事实。
+    """
+    if not supabase:
+        return "❌ 数据库未连接"
+    if not persona_name or not query:
+        return "❌ persona_name 和 query 不能为空"
+
+    limit = max(1, min(30, int(limit)))
+    safe_kw = query.replace("%", "\\%").replace("_", "\\_")
+
+    # 关键词检索：按 assistant_id 过滤 + content ilike
+    def _kw_search():
+        return supabase.table("chat_messages").select("id, content, category, created_at") \
+            .eq("assistant_id", persona_name.strip()) \
+            .ilike("content", f"%{safe_kw}%") \
+            .order("created_at", desc=True).limit(limit).execute()
+
+    res = await asyncio.to_thread(_kw_search)
+    rows = res.data if res and res.data else []
+    if not rows:
+        return f"🔍 [{persona_name}] 未搜到包含「{query}」的精华记忆。"
+
+    # 按类别权重排序：关系/设定/雷点 > 喜好 > 剧情/档案
+    _weight = {"关系": 3, "设定": 3, "雷点": 3, "喜好": 2, "剧情": 1, "档案": 1}
+    rows.sort(key=lambda r: -_weight.get(r.get("category", ""), 0))
+
+    lines = [f"🔍 [{persona_name}] 检索「{query}」命中 {len(rows)} 条精华记忆："]
+    for r in rows:
+        cat = r.get("category", "")
+        lines.append(f"- ({cat}) {r.get('content', '')}")
+    return "\n".join(lines)
+
+
+# ==========================================
 # 4. 启动入口
 # ==========================================
 
