@@ -61,6 +61,22 @@ def _get_mem0():
     return _mem0_client
 
 
+def _get_active_persona(sb):
+    """🌟 读取当前激活的人设（personas 表 is_active=true）。
+    返回 {id, display_name, system_prompt} 或 None。
+    优雅降级：表/字段不存在时返回 None（不影响主流程）。"""
+    if not sb:
+        return None
+    try:
+        res = sb.table("personas").select("id, display_name, system_prompt") \
+            .eq("is_active", True).limit(1).execute()
+        if res and res.data:
+            return res.data[0]
+    except Exception:
+        pass
+    return None
+
+
 class HostFixMiddleware:
     """ASGI 中间件：路由分发 + OpenAI 兼容代理 + MCP 下游转发"""
 
@@ -335,10 +351,12 @@ class HostFixMiddleware:
     async def _inject_context(self, req_data, sb, current_query):
         """
         智能体上下文注入（全部变量化，无硬编码）：
+        - 🌟 当前激活人设（personas 表，优先级最高）
         - 系统当前状态（北京时间 / 沉默时长）
         - 用户画像（user_facts 表）
         - 阶段总结（memories 表 tags=Core_Cognition）
         - Mem0 向量记忆（可选）
+        - 🌟 当前线路精华记忆（chat_messages 表，按 assistant_id 隔离）
         - 最近 N 条对话历史（按 tag 拉，转成 user/assistant 交替）
         """
         ai_name = os.environ.get("AI_NAME", "助手")
@@ -346,6 +364,16 @@ class HostFixMiddleware:
         user_id = os.environ.get("USER_ID", "default")
         persona = os.environ.get("AI_PERSONA", "").strip()
         chat_tag = os.environ.get("CHAT_TAG", "Web_Chat")
+
+        # 🌟 读取当前激活人设（优先于环境变量 AI_PERSONA）
+        active_persona = await asyncio.to_thread(lambda: _get_active_persona(sb))
+        oc_assistant_id = "默认助手_技术线"   # 默认兜底
+        if active_persona:
+            oc_assistant_id = active_persona.get("id", oc_assistant_id)
+            sp = (active_persona.get("system_prompt") or "").strip()
+            if sp:
+                persona = sp   # 激活人设的 system_prompt 覆盖环境变量
+            _log(f"🌟 [人设] 当前激活: {active_persona.get('display_name', oc_assistant_id)}")
         now_bj = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
         time_str = now_bj.strftime("%Y-%m-%d %H:%M")
 
@@ -381,6 +409,32 @@ class HostFixMiddleware:
                 user_prof = "\n".join([f"- {r['key']}: {str(r['value'])[:200]}" for r in pr.data[:30]])
         except Exception:
             pass
+
+        # 🌟 当前线路精华记忆（chat_messages 表，按 assistant_id 隔离）
+        # 类别权重：关系/设定/雷点 > 喜好 > 剧情/档案
+        chat_facts = ""
+        try:
+            # 关键词检索当前查询在当前线路的记忆（top 5）
+            safe_kw = current_query.strip()[:50].replace("%", "\\%").replace("_", "\\_")
+            def _fetch_facts():
+                # 关键词命中
+                kw_q = sb.table("chat_messages").select("content, category").eq("assistant_id", oc_assistant_id)
+                if safe_kw:
+                    kw_q = kw_q.ilike("content", f"%{safe_kw}%")
+                kw_q = kw_q.order("created_at", desc=True).limit(5)
+                kw_res = kw_q.execute()
+                # 兜底：如果关键词没命中，拉该线路最新的核心记忆
+                if not (kw_res and kw_res.data):
+                    return sb.table("chat_messages").select("content, category") \
+                        .eq("assistant_id", oc_assistant_id) \
+                        .in_("category", ["关系", "设定", "雷点", "喜好"]) \
+                        .order("created_at", desc=True).limit(15).execute()
+                return kw_res
+            fr = await asyncio.to_thread(_fetch_facts)
+            if fr and fr.data:
+                chat_facts = "\n".join([f"- {r['content']}" for r in fr.data])
+        except Exception as e:
+            _log(f"⚠️ 拉取精华记忆失败（跳过）: {e}")
 
         # Mem0 向量记忆（可选）
         mem0_context = "无相关深层记忆"
@@ -426,10 +480,12 @@ class HostFixMiddleware:
             _log(f"拉取上文失败（跳过）: {e}")
 
         # 拼装 system prompt
+        facts_block = chat_facts if chat_facts else "暂无"
         status_inject = (
             f"\n\n[系统当前状态]\n当前时间:{time_str}(北京时间),距离上次聊天:{silence_hours}h。\n"
             f"【{user_name}的核心画像】:\n{user_prof}\n\n"
             f"--- 以下为调取的历史背景记忆（请注意这是过去的事，不是现在正在聊的内容） ---\n"
+            f"【当前线路({oc_assistant_id})核心记忆】:\n{facts_block}\n"
             f"【深层关联记忆】:\n{mem0_context}\n"
             f"【近3次阶段总结】:\n{core_summaries}\n"
             f"------------------------------------------------\n"
@@ -520,9 +576,12 @@ class HostFixMiddleware:
                 _log(f"Mem0 写入失败: {e}")
 
         # 3. 🍊 橘瓣记忆库自动归档：把本轮对话原文写入 chat_archive
-        #    按人设/线路隔离；assistant_id 由环境变量或 chat_tag 推断
+        #    🌟 按当前激活人设/线路隔离（优先于环境变量）
         try:
+            active_persona = _get_active_persona(sb)
             oc_assistant_id = os.environ.get("ORANGECHAT_ASSISTANT_ID", "").strip()
+            if active_persona:
+                oc_assistant_id = active_persona.get("id", oc_assistant_id)
             if not oc_assistant_id:
                 oc_assistant_id = chat_tag or "默认助手_技术线"
             now_iso = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).isoformat()

@@ -67,9 +67,15 @@ create table personas (
     id text primary key,
     display_name text not null,
     is_visible boolean default true,
+    is_active boolean default false,        -- 🌟 是否当前激活（全局唯一）
+    system_prompt text default '',          -- 🌟 该线路的人设提示词
     sort_order int default 100,
     created_at timestamptz default now()
 );
+-- 保证全局最多一条激活人设
+create unique index uniq_personas_active
+    on personas (is_active)
+    where is_active = true;
 
 -- 可见人设请在面板「人设管理」中自行添加，此处不预填任何数据。
 

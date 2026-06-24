@@ -125,7 +125,7 @@ async def handle_get_personas(scope, send):
     try:
         show_all = (_parse_query(scope).get("all", "") == "1")
         def _q():
-            q = sb.table("personas").select("id, display_name, is_visible, sort_order")
+            q = sb.table("personas").select("id, display_name, is_visible, sort_order, system_prompt, is_active")
             if not show_all:
                 q = q.eq("is_visible", True)
             return q.order("sort_order").execute()
@@ -470,6 +470,7 @@ async def handle_post_persona(scope, receive, send):
             "display_name": display_name,
             "is_visible": bool(is_visible),
             "sort_order": int(sort_order),
+            "system_prompt": str(body.get("system_prompt", "") or ""),
         }
         def _insert():
             return sb.table("personas").insert(row).execute()
@@ -507,6 +508,18 @@ async def handle_patch_persona(scope, receive, send):
             update_fields["is_visible"] = bool(body["is_visible"])
         if "sort_order" in body:
             update_fields["sort_order"] = int(body["sort_order"])
+        if "system_prompt" in body:
+            update_fields["system_prompt"] = str(body.get("system_prompt") or "")
+
+        # 特殊处理：激活/取消激活（保证全局唯一）
+        activate = body.get("activate")
+        if activate is not None:
+            update_fields["is_active"] = bool(activate)
+            if activate:
+                # 先把所有人设的 is_active 置 false（利用 partial unique index）
+                def _deactivate_all():
+                    sb.table("personas").update({"is_active": False}).eq("is_active", True).execute()
+                await asyncio.to_thread(_deactivate_all)
 
         if not update_fields:
             await _send_json_resp(send, 400, {"error": "没有需要更新的字段"})
@@ -518,8 +531,34 @@ async def handle_patch_persona(scope, receive, send):
         _log(f"📝 [panel] 编辑人设: {pid} → {update_fields}")
         await _send_json_resp(send, 200, {"ok": True})
     except Exception as e:
-        _log(f"❌ [panel] 编辑人设失败: {e}")
-        await _send_json_resp(send, 500, {"error": str(e)})
+        err_str = str(e).lower()
+        if "uniq_personas_active" in err_str or "23505" in err_str:
+            await _send_json_resp(send, 409, {"error": "激活冲突：请重试（系统已自动取消旧激活）"})
+        else:
+            _log(f"❌ [panel] 编辑人设失败: {e}")
+            await _send_json_resp(send, 500, {"error": str(e)})
+
+
+async def handle_get_active_persona(scope, send):
+    """GET /api/panel/active_persona — 返回当前激活的人设（供网关/面板查询）"""
+    sb = _get_supabase()
+    if not sb:
+        await _send_json_resp(send, 500, {"error": "数据库未连接"})
+        return
+    try:
+        def _q():
+            return sb.table("personas").select("id, display_name, system_prompt, is_active") \
+                .eq("is_active", True).limit(1).execute()
+        res = await asyncio.to_thread(_q)
+        persona = res.data[0] if res and res.data else None
+        await _send_json_resp(send, 200, {"persona": persona})
+    except Exception as e:
+        err_str = str(e).lower()
+        if "does not exist" in err_str or "42p01" in err_str or "42703" in err_str:
+            await _send_json_resp(send, 200, {"persona": None, "warning": "请先执行 migration_phase2_personas.sql"})
+        else:
+            _log(f"❌ [panel] 查询激活人设失败: {e}")
+            await _send_json_resp(send, 500, {"error": str(e)})
 
 
 async def handle_delete_persona(scope, receive, send):
@@ -590,6 +629,8 @@ async def handle_panel_request(scope, receive, send):
     try:
         if path == "/api/panel/personas" and method == "GET":
             await handle_get_personas(scope, send)
+        elif path == "/api/panel/active_persona" and method == "GET":
+            await handle_get_active_persona(scope, send)
         elif path == "/api/panel/persona" and method == "POST":
             await handle_post_persona(scope, receive, send)
         elif path == "/api/panel/persona" and method == "PATCH":

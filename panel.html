@@ -153,6 +153,7 @@
 <header>
   <div class="header-row">
     <h1>🍊 橘瓣记忆库</h1>
+    <span style="font-size:12px;color:var(--accent);font-weight:600" id="activePersonaBadge">🌟 当前: 未设置</span>
     <span class="status-dot" id="statusDot"></span>
     <span style="font-size:12px;color:var(--text-soft);font-weight:600" id="statusText">未连接</span>
   </div>
@@ -299,6 +300,7 @@ async function connect() {
       personas.map(p => `<option value="${esc(p.id)}">${esc(p.display_name)}</option>`).join('');
     setupPageSizeOptions();
     loadList(1);
+    updateActivePersonaBadge(personas);
     toast('连接成功 🌸', 'ok');
   } catch(e) {
     document.getElementById('statusDot').className = 'status-dot err';
@@ -315,7 +317,22 @@ async function connect() {
 function switchTab(tab) {
   currentTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  const isPersonaTab = tab === 'personas';
   const isMsg = tab === 'messages';
+  if (isPersonaTab) {
+    document.getElementById('filterBar').classList.add('hidden');
+    document.getElementById('listArea').classList.add('hidden');
+    document.getElementById('pager').classList.add('hidden');
+    document.getElementById('personaArea').classList.remove('hidden');
+    document.getElementById('fabAdd').classList.add('hidden');
+    loadPersonas();
+    return;
+  }
+  document.getElementById('filterBar').classList.remove('hidden');
+  document.getElementById('listArea').classList.remove('hidden');
+  document.getElementById('pager').classList.remove('hidden');
+  document.getElementById('personaArea').classList.add('hidden');
+  document.getElementById('fabAdd').classList.remove('hidden');
   document.getElementById('catFilterRow').style.display = isMsg ? '' : 'none';
   document.getElementById('roleFilterRow').style.display = isMsg ? 'none' : '';
   setupPageSizeOptions();
@@ -568,18 +585,34 @@ async function loadPersonas() {
       area.innerHTML = '<div class="empty"><span class="emoji">🎭</span>暂无人设，点击上方按钮新增</div>';
       return;
     }
+    // 找到当前激活的人设
+    const activeId = list.find(p => p.is_active === true)?.id;
+    // 更新顶栏激活人设徽标
+    updateActivePersonaBadge(list);
+
     area.innerHTML = list.map(p => {
       const visTag = p.is_visible === false
         ? '<span class="role-tag role-system" style="background:rgba(156,163,175,0.2);color:#6b7280">隐藏</span>'
         : '<span class="role-tag role-user" style="background:rgba(107,203,119,0.18);color:#16a34a">可见</span>';
+      const isActive = p.is_active === true;
+      const activeTag = isActive ? '<span class="role-tag role-assistant" style="background:rgba(255,126,179,0.2);color:var(--accent)">🌟 已激活</span>' : '';
+      // system_prompt 预览（截断）
+      const sp = (p.system_prompt || '').trim();
+      const spPreview = sp ? `<div class="item-content clamp" style="font-size:12px;color:var(--text-soft);max-height:3em;margin-top:4px">📝 ${esc(sp)}</div>` : '';
+      // 激活/取消按钮
+      const activateBtn = isActive
+        ? `<button class="btn btn-sm" onclick="toggleActivate('${esc(p.id)}', false)">⭐ 取消激活</button>`
+        : `<button class="btn btn-sm btn-primary" onclick="toggleActivate('${esc(p.id)}', true)">🌟 设为当前</button>`;
       return `<div class="item">
         <div class="item-head">
           <span style="font-weight:700;font-size:15px">${esc(p.display_name)}</span>
-          ${visTag}
+          ${visTag}${activeTag}
           <span class="item-time">ID: ${esc(p.id)}</span>
         </div>
         <div class="item-content" style="font-size:12px;color:var(--text-soft)">排序: ${esc(p.sort_order!==undefined?p.sort_order:'-')}</div>
+        ${spPreview}
         <div class="item-actions">
+          ${activateBtn}
           <button class="btn btn-sm" onclick="openPersonaEditModal('${esc(p.id)}')">✏️ 编辑</button>
           <button class="btn btn-sm btn-danger" onclick="delPersona('${esc(p.id)}')">🗑️ 删除</button>
         </div>
@@ -588,6 +621,38 @@ async function loadPersonas() {
     window._personaCache = list;
   } catch(e) {
     area.innerHTML = '<div class="empty"><span class="emoji">😢</span>'+esc(e.message)+'</div>';
+  }
+}
+
+async function toggleActivate(id, activate) {
+  try {
+    await api('/api/panel/persona', 'PATCH', { id, activate });
+    toast(activate ? '已设为当前人设 🌟' : '已取消激活', 'ok');
+    loadPersonas();
+  } catch(e) { toast('操作失败: '+e.message, 'err'); }
+}
+
+async function updateActivePersonaBadge(list) {
+  // 从参数或 API 获取当前激活人设
+  try {
+    if (!list) {
+      const res = await api('/api/panel/active_persona');
+      const p = res.persona;
+      if (p) {
+        document.getElementById('activePersonaBadge').textContent = '🌟 当前: ' + p.display_name;
+      } else {
+        document.getElementById('activePersonaBadge').textContent = '🌟 当前: 未设置';
+      }
+      return;
+    }
+    const active = list.find(p => p.is_active === true);
+    if (active) {
+      document.getElementById('activePersonaBadge').textContent = '🌟 当前: ' + active.display_name;
+    } else {
+      document.getElementById('activePersonaBadge').textContent = '🌟 当前: 未设置';
+    }
+  } catch(e) {
+    document.getElementById('activePersonaBadge').textContent = '🌟 当前: 未设置';
   }
 }
 
@@ -605,6 +670,8 @@ function openPersonaModal() {
       <option value="true">✅ 可见</option>
       <option value="false">🚫 隐藏</option>
     </select>
+    <label>📝 人设提示词（system_prompt，选填）</label>
+    <textarea id="pSystemPrompt" placeholder="如：你叫骆云影，性格冷淡但内心温柔...&#10;该人设激活后，会作为 system prompt 注入橘瓣聊天"></textarea>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn btn-primary" onclick="submitPersonaAdd()">💾 保存</button>
@@ -628,6 +695,8 @@ function openPersonaEditModal(id) {
       <option value="true" ${p.is_visible!==false?'selected':''}>✅ 可见</option>
       <option value="false" ${p.is_visible===false?'selected':''}>🚫 隐藏</option>
     </select>
+    <label>📝 人设提示词（system_prompt，选填）</label>
+    <textarea id="pSystemPrompt" placeholder="如：你叫骆云影，性格冷淡但内心温柔...">${esc(p.system_prompt || '')}</textarea>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn btn-primary" onclick="submitPersonaEdit('${esc(p.id)}')">💾 保存</button>
@@ -643,6 +712,7 @@ async function submitPersonaAdd() {
     is_visible: document.getElementById('pVisible').value === 'true',
   };
   if (!body.id || !body.display_name) { toast('ID 和名称不能为空', 'err'); return; }
+  body.system_prompt = document.getElementById('pSystemPrompt').value.trim();
   try {
     await api('/api/panel/persona', 'POST', body);
     toast('人设已新增 🌸', 'ok');
@@ -657,6 +727,7 @@ async function submitPersonaEdit(id) {
     display_name: document.getElementById('pName').value.trim(),
     sort_order: parseInt(document.getElementById('pSort').value) || 100,
     is_visible: document.getElementById('pVisible').value === 'true',
+    system_prompt: document.getElementById('pSystemPrompt').value.trim(),
   };
   try {
     await api('/api/panel/persona', 'PATCH', body);
