@@ -602,7 +602,7 @@ class HostFixMiddleware:
 
         # 3. 🧠 异步触发统一对话总结（不阻塞响应）
         try:
-            await _check_and_summarize_all(sb)
+            await self._check_and_summarize_all(sb)
         except Exception as e:
             _log(f"⚠️ 触发对话总结失败（不影响主流程）: {e}")
 
