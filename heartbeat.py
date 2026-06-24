@@ -54,7 +54,7 @@ async def async_autonomous_life():
         await asyncio.sleep(interval + wake_jitter)
 
         try:
-            client = _get_llm_client("default")
+            client = _get_llm_client("main_chat")
             if not client:
                 continue
 
@@ -133,10 +133,10 @@ async def _perform_deep_dreaming():
         if len(context) > 80000:
             context = context[-80000:]
 
-        # 获取便宜模型客户端（复用自动总结同款，保持低成本）
-        client = _get_llm_client("silicon1")
+        # 获取主对话模型客户端（用户要求：总结类一律用聊天模型，不用便宜/默认模型）
+        client = _get_llm_client("main_chat")
         if not client:
-            print("⚠️ 未配置 SILICON1_API_KEY，日记生成跳过（LLM 客户端缺失）。")
+            print("⚠️ 未配置 CHAT_API_KEY，日记生成跳过（LLM 客户端缺失）。")
             return
 
         # 步骤1：生成每日日记（第一人称视角）
@@ -363,7 +363,7 @@ async def async_telegram_polling():
                     continue
 
                 # 调用 LLM 生成回复
-                client = _get_llm_client("default")
+                client = _get_llm_client("main_chat")
                 if client:
                     try:
                         recent_mem = await get_latest_diary()
@@ -428,7 +428,8 @@ async def async_message_summarizer():
         await asyncio.sleep(interval)
         if not supabase:
             continue
-        client = _get_llm_client("default")
+        # 消息总结也是总结类，按用户要求统一用聊天模型（main_chat）
+        client = _get_llm_client("main_chat")
         if not client:
             continue
         try:
@@ -506,7 +507,7 @@ async def async_reminder_worker():
                             final_push_text = raw_msg
 
                             # 尝试用 LLM 生成更自然的提醒文案
-                            client = _get_llm_client("default")
+                            client = _get_llm_client("main_chat")
                             if client:
                                 try:
                                     curr_persona = _get_current_persona()

@@ -289,7 +289,7 @@ async def _process_napcat_message(data: dict, send):
         if not dep:
             return
 
-        client = dep._get_llm_client("default")
+        client = dep._get_llm_client("main_chat")
         if not client:
             await send_qq_message(
                 group_id if message_type == "group" else sender_id,
@@ -398,10 +398,11 @@ async def check_and_summarize_all():
                     f"2. 绝对禁止以'今天'开头！因为这些聊天记录可能跨越了好几天。请扔掉日记格式，直接开门见山地叙述事情"
                     f"（例如直接说：'{user_name}最近在忙...' 或 '我们刚才聊了...'）。"
                 )
-                client = dep._get_llm_client("silicon1")
+                # 用户要求：总结类一律用聊天模型（main_chat），不用便宜/默认模型
+                client = dep._get_llm_client("main_chat")
                 if client:
                     try:
-                        model_name = getattr(client, 'custom_model_name', "Qwen/Qwen2.5-7B-Instruct")
+                        model_name = getattr(client, 'custom_model_name', "abab6.5s-chat")
                         summary = client.chat.completions.create(
                             model=model_name,
                             messages=[{"role": "user", "content": prompt}],
@@ -424,7 +425,7 @@ async def check_and_summarize_all():
                         ).in_("id", all_ids_to_archive).execute()
                         _naplog(f"✅ 虽然总结失败，但已将 {len(all_ids_to_archive)} 条旧记录归档，防止下次继续堆积")
                 else:
-                    _naplog("⚠️ 未配置 SILICON1_API_KEY，跳过总结（仅归档旧记录）")
+                    _naplog("⚠️ 未配置 CHAT_API_KEY，跳过总结（仅归档旧记录）")
                     dep.supabase.table("memories").update(
                         {"tags": "Archived_Chat", "importance": 1}
                     ).in_("id", all_ids_to_archive).execute()

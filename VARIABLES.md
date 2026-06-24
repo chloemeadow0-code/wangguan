@@ -47,7 +47,7 @@
 | `USER_ID` | ❌ | `default` | 用户隔离 ID（Mem0 向量记忆按此区分不同用户） |
 | `AI_PERSONA` | ❌ | 空 | AI 人设完整文本，会拼接到 system 提示最前面 |
 | `CHAT_TAG` | ❌ | `Web_Chat` | 存库时给本轮对话打的标签（用于区分网页/TG/QQ 渠道） |
-| `SUMMARY_THRESHOLD` | ❌ | `30` | 🆕 自动总结阈值：全渠道（网页/QQ/TG/邮件）对话流水累计达到该条数时，自动调用便宜模型（`SILICON1`）生成第一人称阶段总结，存入 `Core_Cognition` 并归档旧记录。依赖 `SILICON1_API_KEY`。 |
+| `SUMMARY_THRESHOLD` | ❌ | `30` | 🆕 自动总结阈值：全渠道（网页/QQ/TG/邮件）对话流水累计达到该条数时，自动调用聊天模型（`main_chat`）生成第一人称阶段总结，存入 `Core_Cognition` 并归档旧记录。依赖 `CHAT_API_KEY`。 |
 
 ---
 
@@ -68,11 +68,15 @@
 
 网关支持 5 个 LLM 角色，用 `switch_ai_brain` 工具可热切换默认角色。最小化配置只需 `OPENAI_*`。
 
-### 3.1 默认 / 通用模型 (OpenAI 兼容)
+### 3.1 默认 / 通用模型 (OpenAI 兼容) ⚠️ 已废弃
+
+> ⚠️ **自 v2.0 起，系统不再主动调用此模型**。所有对话/总结/日记已统一改用 `main_chat`（见 3.2）。
+> 本组变量仅作**向后兼容保留**：若 `main_chat` 未配置，极少数回退逻辑（如 `_ask_llm_async` 的模型名兜底）仍会读取它。
+> **推荐：直接配置 `CHAT_*` 即可，无需配置本组。**
 
 | 变量名 | 必填 | 默认值 | 兼容别名 |
 |--------|:---:|--------|---------|
-| `OPENAI_API_KEY` | ✅ | 空 | `DEFAULT_API_KEY` |
+| `OPENAI_API_KEY` | ❌ | 空 | `DEFAULT_API_KEY` |
 | `OPENAI_BASE_URL` | ❌ | 空（用官方） | `DEFAULT_BASE_URL` |
 | `OPENAI_MODEL_NAME` | ❌ | `gpt-3.5-turbo` | `DEFAULT_MODEL_NAME` |
 
@@ -254,7 +258,7 @@ Gmail 收发 & Google 日历。需要 Google OAuth 用户令牌。
 | `SUMMARIZE_INTERVAL` | ❌ | `1800` | 消息总结间隔（秒） |
 | `SCHEDULE_MORNING_TIME` | ❌ | `07:30` | 日程早播时间 |
 | `SCHEDULE_EVENING_TIME` | ❌ | `22:00` | 日程晚播时间 |
-| `DIARY_TIME` | ❌ | `03:00` | 🆕 每日日记生成时间（24小时制）。到点自动拉取昨日全部对话流水，调用 SILICON1 便宜模型生成第一人称"昨日回溯"日记，存入 Core_Cognition。启动时若发现昨日日记缺失会自动补写。依赖 SILICON1_API_KEY。 |
+| `DIARY_TIME` | ❌ | `03:00` | 🆕 每日日记生成时间（24小时制）。到点自动拉取昨日全部对话流水，调用聊天模型（`main_chat`）生成第一人称"昨日回溯"日记，存入 Core_Cognition。启动时若发现昨日日记缺失会自动补写。依赖 CHAT_API_KEY。 |
 | `SYNC_KEYS` | ❌ | 空 | 额外热同步的环境变量键，逗号分隔 |
 
 ---
@@ -282,11 +286,12 @@ Gmail 收发 & Google 日历。需要 Google OAuth 用户令牌。
 只配置以下 3 项，网关即可正常启动并提供基础 MCP 工具：
 
 ```env
-# 必填：基础 + LLM
+# 必填：基础 + LLM（主对话模型 CHAT_*）
 PORT=10000
 API_SECRET=请改成你的随机密钥
-OPENAI_API_KEY=sk-xxxxxxxx
-OPENAI_MODEL_NAME=gpt-4o-mini
+CHAT_API_KEY=sk-xxxxxxxx
+CHAT_MODEL_NAME=abab6.5s-chat
+# 注：OPENAI_* 已废弃，所有对话/总结统一用 CHAT_*，无需配置
 
 # 可选但推荐：数据库 + 推送
 SUPABASE_URL=https://xxxxx.supabase.co

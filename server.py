@@ -1091,7 +1091,7 @@ async def tarot_reading(question: str):
         "XVIII. 月亮 (The Moon)", "XIX. 太阳 (The Sun)", "XX. 审判 (Judgement)", "XXI. 世界 (The World)"
     ]
     draw = random.sample(deck, 3)
-    client = _get_llm_client("openai")
+    client = _get_llm_client("main_chat")
     if not client:
         return f"🔮 抽牌结果：{', '.join(draw)}。\n(⚠️ LLM 未配置，无法解读)"
     persona = await asyncio.to_thread(_get_current_persona)
