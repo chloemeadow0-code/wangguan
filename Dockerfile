@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制项目源码
-COPY server.py gateway.py heartbeat.py napcat.py ./
+COPY server.py gateway.py heartbeat.py napcat.py panel.py panel.html ./
 
 # 暴露端口 (云平台通过 PORT 环境变量覆盖)
 ENV PORT=10000
