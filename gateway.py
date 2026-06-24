@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import time
+import hmac
 import datetime
 import requests
 
@@ -161,11 +162,9 @@ class HostFixMiddleware:
         path = scope["path"]
         method = scope["method"]
 
-        # 可选鉴权
-        api_secret = os.environ.get("API_SECRET", "").strip()
-        if api_secret:
-            if not await _check_api_secret(scope, send):
-                return
+        # 🛡️ 强制鉴权（防止 LLM 额度被白嫖 / 账号被滥用）
+        if not await _check_api_secret(scope, send):
+            return
 
         # ---- /v1/models ----
         if path == "/v1/models" and method == "GET":
@@ -257,7 +256,7 @@ class HostFixMiddleware:
             if h in client_headers:
                 fwd_headers[h] = client_headers[h]
 
-        _log(f"➡️ [转发] POST {upstream_url} | model={req_data.get('model')} | key={upstream_key[:6]}***")
+        _log(f"➡️ [转发] POST {upstream_url} | model={req_data.get('model')}")
 
         # 启动响应流（通知客户端开始接收 SSE）
         await send({
@@ -267,7 +266,7 @@ class HostFixMiddleware:
                 (b"content-type", b"text/event-stream; charset=utf-8"),
                 (b"cache-control", b"no-cache"),
                 (b"connection", b"keep-alive"),
-                (b"access-control-allow-origin", b"*"),
+                (b"access-control-allow-origin", _allowed_cors_origin()),
             ],
         })
 
@@ -281,7 +280,8 @@ class HostFixMiddleware:
                 fwd_headers["Connection"] = "keep-alive"
                 with requests.post(upstream_url, headers=fwd_headers, json=req_data, stream=True, timeout=300) as resp:
                     if resp.status_code != 200:
-                        q.put({"error": f"HTTP {resp.status_code}: {resp.text[:500]}"})
+                        _log(f"❌ 上游返回 HTTP {resp.status_code}: {resp.text[:300]}")
+                        q.put({"error": f"上游服务返回 HTTP {resp.status_code}（详情见服务端日志）"})
                         q.put(None)
                         return
                     for line in resp.iter_lines():
@@ -357,13 +357,12 @@ class HostFixMiddleware:
         - 阶段总结（memories 表 tags=Core_Cognition）
         - Mem0 向量记忆（可选）
         - 🌟 当前线路精华记忆（chat_messages 表，按 assistant_id 隔离）
-        - 最近 N 条对话历史（按 tag 拉，转成 user/assistant 交替）
+        - 最近 N 条对话历史（从 chat_archive 读取，按 assistant_id 隔离）
         """
         ai_name = os.environ.get("AI_NAME", "助手")
         user_name = os.environ.get("USER_NAME", "用户")
         user_id = os.environ.get("USER_ID", "default")
         persona = os.environ.get("AI_PERSONA", "").strip()
-        chat_tag = os.environ.get("CHAT_TAG", "Web_Chat")
 
         # 🌟 读取当前激活人设（优先于环境变量 AI_PERSONA）
         active_persona = await asyncio.to_thread(lambda: _get_active_persona(sb))
@@ -377,10 +376,10 @@ class HostFixMiddleware:
         now_bj = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
         time_str = now_bj.strftime("%Y-%m-%d %H:%M")
 
-        # 沉默时长（从最近一条对话到现在的小时差，优雅降级）
+        # 沉默时长（从 chat_archive 最近一条记录到现在的小时差，优雅降级）
         silence_hours = 0
         try:
-            res = await asyncio.to_thread(lambda: sb.table("memories").select("created_at").eq("tags", chat_tag).order("created_at", desc=True).limit(1).execute())
+            res = await asyncio.to_thread(lambda: sb.table("chat_archive").select("created_at").eq("assistant_id", oc_assistant_id).order("created_at", desc=True).limit(1).execute())
             if res and res.data:
                 last = res.data[0].get("created_at", "")
                 if last:
@@ -451,21 +450,22 @@ class HostFixMiddleware:
             except Exception as e:
                 _log(f"Mem0 检索失败（跳过）: {e}")
 
-        # 最近对话历史（按 tag 拉，转成 user/assistant 交替）
+        # 📝 方案A：对话历史从 chat_archive 读取（按 assistant_id 隔离）
         history_msgs = []
         try:
-            _TAGS = [chat_tag]
-            hr = await asyncio.to_thread(lambda: sb.table("memories").select("content, tags").in_("tags", _TAGS).order("created_at", desc=True).limit(20).execute())
+            hr = await asyncio.to_thread(lambda: sb.table("chat_archive").select("role, content, created_at").eq("assistant_id", oc_assistant_id).order("created_at", desc=True).limit(20).execute())
             if hr and hr.data:
                 rows = list(reversed(hr.data))[-10:]
                 for row in rows:
-                    c = str(row.get("content", "")).strip()
-                    if not c:
+                    role = row.get("role", "user")
+                    content = str(row.get("content", "")).strip()
+                    if not content:
                         continue
-                    if c.startswith(user_name):
-                        history_msgs.append({"role": "user", "content": (c.split("：", 1)[-1] if "：" in c else c)[:500]})
-                    elif c.startswith("我(") or c.startswith(f"我({ai_name})"):
-                        history_msgs.append({"role": "assistant", "content": (c.split("：", 1)[-1] if "：" in c else c)[:500]})
+                    # 跳过工具调用系统记录
+                    if content.startswith("[系统记录："):
+                        continue
+                    history_role = "user" if role == "user" else "assistant"
+                    history_msgs.append({"role": history_role, "content": content[:500]})
                 # 合并相邻同 role
                 merged = []
                 for m in history_msgs:
@@ -520,12 +520,8 @@ class HostFixMiddleware:
         _log(f"🧠 [智能体] 注入完成：画像{len(user_prof)}字 + 总结{len(core_summaries)}字 + Mem0{len(mem0_context)}字 + 上文{len(history_msgs)}条")
 
     async def _save_conversation(self, sb, user_msg, ai_msg, reasoning, tool_calls):
-        """异步把本轮对话存到 Supabase memories 表 + Mem0 + 橘瓣 chat_archive"""
-        ai_name = os.environ.get("AI_NAME", "助手")
-        user_name = os.environ.get("USER_NAME", "用户")
+        """异步把本轮对话存到橘瓣 chat_archive + Mem0 + 自动提炼（方案A：不再写 memories 流水）"""
         user_id = os.environ.get("USER_ID", "default")
-        chat_tag = os.environ.get("CHAT_TAG", "Web_Chat")
-        now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
         final_save_text = ai_msg
         if reasoning:
@@ -534,34 +530,10 @@ class HostFixMiddleware:
             tc_names = [tc.get("function", {}).get("name", "unknown") for tc in tool_calls.values()]
             final_save_text = f"[系统记录：调用了工具 {', '.join(tc_names)}]"
 
-        # 1. 存到 memories 表（user + assistant 两条）
-        try:
-            def _save_user():
-                sb.table("memories").insert({
-                    "title": f"💬 {user_name}说",
-                    "content": f"{user_name}：{user_msg[:2000]}",
-                    "category": "流水",
-                    "mood": "平静",
-                    "tags": chat_tag,
-                    "created_at": now_str,
-                }).execute()
-            await asyncio.to_thread(_save_user)
+        # 📝 方案A：对话原文不再写入 memories 表，统一由 chat_archive 归档。
+        #    memories 表仅保留日记 / Core_Cognition 总结 / 心跳记录。
 
-            def _save_ai():
-                sb.table("memories").insert({
-                    "title": f"🤖 {ai_name}回复",
-                    "content": f"我({ai_name})：{final_save_text[:2000]}",
-                    "category": "流水",
-                    "mood": "温和",
-                    "tags": chat_tag,
-                    "created_at": now_str,
-                }).execute()
-            await asyncio.to_thread(_save_ai)
-            _log(f"💾 已存库：{user_name}问({len(user_msg)}字) + {ai_name}答({len(final_save_text)}字)")
-        except Exception as e:
-            _log(f"❌ 存库失败: {e}")
-
-        # 2. 写入 Mem0（可选）
+        # 1. 写入 Mem0（可选）
         mc = _get_mem0()
         if mc and user_msg:
             try:
@@ -575,7 +547,7 @@ class HostFixMiddleware:
             except Exception as e:
                 _log(f"Mem0 写入失败: {e}")
 
-        # 3. 🍊 橘瓣记忆库自动归档：把本轮对话原文写入 chat_archive
+        # 2. 🍊 橘瓣记忆库自动归档：把本轮对话原文写入 chat_archive
         #    🌟 按当前激活人设/线路隔离（优先于环境变量）
         try:
             active_persona = _get_active_persona(sb)
@@ -583,7 +555,7 @@ class HostFixMiddleware:
             if active_persona:
                 oc_assistant_id = active_persona.get("id", oc_assistant_id)
             if not oc_assistant_id:
-                oc_assistant_id = chat_tag or "默认助手_技术线"
+                oc_assistant_id = "默认助手_技术线"
             now_iso = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).isoformat()
 
             def _archive_user():
@@ -610,27 +582,38 @@ class HostFixMiddleware:
             if final_save_text:
                 await asyncio.to_thread(_archive_ai)
             _log(f"🍊 [归档] 已写入 chat_archive [{oc_assistant_id}]: user({len(user_msg)}字) + assistant({len(final_save_text)}字)")
+
+            # 🆕 自动精华提炼：从本轮对话提取长期事实写入 chat_messages
+            #    方案A：归档是橘瓣系统的唯一原文来源，提炼只依赖 chat_archive
+            #    全程异步，失败只记日志，不影响对话
+            try:
+                from distill import run_distill
+                conv_text = f"用户：{user_msg[:2000]}"
+                if final_save_text:
+                    conv_text += f"\n助手：{final_save_text[:2000]}"
+                distill_result = await run_distill(oc_assistant_id, conv_text)
+                if distill_result.get("ok"):
+                    s = distill_result.get("stats", {})
+                    _log(f"🧠 [提炼] [{oc_assistant_id}] 新增{s.get('new',0)} 更新{s.get('updated',0)} 冲突{s.get('conflict',0)} 跳过{s.get('skipped',0)}")
+            except Exception as e:
+                _log(f"⚠️ 自动精华提炼失败（不影响主流程）: {e}")
         except Exception as e:
             _log(f"⚠️ 橘瓣自动归档失败（不影响主流程）: {e}")
 
-        # 4. 🧠 异步触发统一对话总结（不阻塞响应）
-        #    监控网页对话流水，
-        #    累计达到 SUMMARY_THRESHOLD（默认30条）时自动总结归档。
+        # 3. 🧠 异步触发统一对话总结（不阻塞响应）
         try:
             await _check_and_summarize_all(sb)
         except Exception as e:
             _log(f"⚠️ 触发对话总结失败（不影响主流程）: {e}")
 
     async def _check_and_summarize_all(self, sb):
-        """🧠 统一对话总结机制
-        监控网页对话流水，当累计达到阈值（默认30条，可通过 SUMMARY_THRESHOLD 配置）时，
-        自动触发大模型总结并归档，生成阶段总结存入 Core_Cognition。
+        """🧠 统一对话总结机制（方案A：从 chat_archive 读取，按当前激活人设隔离）
+        当累计达到阈值时，自动触发大模型总结并归档，生成阶段总结存入 Core_Cognition。
         """
         try:
             threshold = int(os.environ.get("SUMMARY_THRESHOLD", "30"))
             ai_name = os.environ.get("AI_NAME", "助手")
             user_name = os.environ.get("USER_NAME", "用户")
-            chat_tag = os.environ.get("CHAT_TAG", "Web_Chat")
 
             _MAX_MSG_CHARS = 500
             _MAX_PROMPT_CHARS = 80000
@@ -638,18 +621,21 @@ class HostFixMiddleware:
             def _check():
                 if not sb:
                     return
-                all_chats = sb.table("memories").select("id, title, content, tags").eq("tags", chat_tag).order("created_at").execute()
+                # 📝 方案A：从 chat_archive 读对话原文（按当前激活人设隔离）
+                active = _get_active_persona(sb)
+                summarizer_id = active.get("id", "默认助手_技术线") if active else os.environ.get("ORANGECHAT_ASSISTANT_ID", "默认助手_技术线")
+                all_chats = sb.table("chat_archive").select("id, role, content, created_at").eq("assistant_id", summarizer_id).order("created_at").execute()
                 if all_chats and all_chats.data and len(all_chats.data) >= threshold:
                     items_to_summarize = all_chats.data[-threshold:]
                     all_ids_to_archive = [item['id'] for item in all_chats.data]
 
-                    _log(f"📦 累计对话满 {len(all_chats.data)} 条，正在触发总结（取最新{threshold}条，归档全部）...")
+                    _log(f"📦 [{summarizer_id}] 归档累计满 {len(all_chats.data)} 条，正在触发总结（取最新{threshold}条，归档全部）...")
 
                     chat_parts = []
                     total_chars = 0
                     for item in items_to_summarize:
                         truncated_content = item['content'][:_MAX_MSG_CHARS]
-                        part = f"[网页]{item['title']}: {truncated_content}"
+                        part = f"[{item.get('role', 'user')}] {truncated_content}"
                         if total_chars + len(part) > _MAX_PROMPT_CHARS:
                             _log(f"⚠️ 总结prompt已达 {_MAX_PROMPT_CHARS} 字符上限，截断剩余记录")
                             break
@@ -678,21 +664,11 @@ class HostFixMiddleware:
                                     "title": "📚 全渠道阶段总结", "content": summary,
                                     "category": "记事", "mood": "温情", "tags": "Core_Cognition"
                                 }).execute()
-                            sb.table("memories").update(
-                                {"tags": "Archived_Chat", "importance": 1}
-                            ).in_("id", all_ids_to_archive).execute()
-                            _log(f"✅ 对话总结完成，已归档 {len(all_ids_to_archive)} 条流水")
+                            _log(f"✅ 对话总结完成")
                         except Exception as llm_err:
                             _log(f"❌ 总结LLM调用失败: {llm_err}")
-                            sb.table("memories").update(
-                                {"tags": "Archived_Chat", "importance": 1}
-                            ).in_("id", all_ids_to_archive).execute()
-                            _log(f"✅ 虽然总结失败，但已将 {len(all_ids_to_archive)} 条旧记录归档")
                     else:
-                        _log("⚠️ 未配置 CHAT_API_KEY，跳过总结（仅归档旧记录）")
-                        sb.table("memories").update(
-                            {"tags": "Archived_Chat", "importance": 1}
-                        ).in_("id", all_ids_to_archive).execute()
+                        _log("⚠️ 未配置 CHAT_API_KEY，跳过总结")
             await asyncio.to_thread(_check)
         except Exception as e:
             _log(f"❌ 统一对话总结失败: {e}")
@@ -712,6 +688,16 @@ class HostFixMiddleware:
 # 辅助函数
 # ==========================================
 
+def _allowed_cors_origin() -> bytes:
+    """读取 CORS_ALLOWED_ORIGINS 返回允许的 Origin（逗号分隔，取首个）。
+    未配置则返回 * 兼容旧部署；生产环境建议配置为前端域名以收紧跨域策略。"""
+    allowed = os.environ.get("CORS_ALLOWED_ORIGINS", "").strip()
+    if not allowed:
+        return b"*"
+    first = allowed.split(",")[0].strip()
+    return first.encode("utf-8") if first else b"*"
+
+
 def _get_openai_client():
     """惰性创建 OpenAI 兼容客户端（用 CHAT_* 优先，回退 OPENAI_*）。"""
     key = os.environ.get("CHAT_API_KEY", os.environ.get("OPENAI_API_KEY", "")).strip()
@@ -727,16 +713,27 @@ def _get_openai_client():
 
 
 async def _check_api_secret(scope, send):
-    """校验 API_SECRET。返回 True=通过，False=已拒绝(已发送 401)"""
+    """校验 API_SECRET（🛡️ 强制鉴权）。返回 True=通过，False=已拒绝（已发送 401/403）。
+    安全策略：未配置 API_SECRET 时【拒绝】所有受保护接口，避免误开导致裸奔。"""
     api_secret = os.environ.get("API_SECRET", "").strip()
     if not api_secret:
-        return True   # 没配就不强制鉴权（保持兼容）
+        _log("🚫 [安全] API_SECRET 未配置，拒绝访问受保护接口（请在环境变量中设置 API_SECRET）")
+        await send({"type": "http.response.start", "status": 403,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"access-control-allow-origin", _allowed_cors_origin())]})
+        await send({"type": "http.response.body",
+                    "body": b'{"error":"Forbidden: API_SECRET is not configured on the server"}'})
+        return False
     headers_dict = {k.decode("utf-8").lower(): v.decode("utf-8") for k, v in scope.get("headers", [])}
     auth_token = headers_dict.get("authorization", "").replace("Bearer ", "").replace("bearer ", "").strip()
     x_api_key = headers_dict.get("x-api-key", "").strip()
-    if auth_token != api_secret and x_api_key != api_secret:
+    # 常量时间比较，防止时序攻击逐字节爆破密钥
+    ok = (auth_token and hmac.compare_digest(auth_token, api_secret)) or \
+         (x_api_key and hmac.compare_digest(x_api_key, api_secret))
+    if not ok:
         await send({"type": "http.response.start", "status": 401,
-                    "headers": [(b"content-type", b"application/json"), (b"access-control-allow-origin", b"*")]})
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"access-control-allow-origin", _allowed_cors_origin())]})
         await send({"type": "http.response.body", "body": b'{"error":"Unauthorized: Missing or invalid API key"}'})
         return False
     return True
@@ -749,7 +746,7 @@ async def _send_json_resp(send, status: int, data: dict):
         "status": status,
         "headers": [
             (b"content-type", b"application/json; charset=utf-8"),
-            (b"access-control-allow-origin", b"*"),
+            (b"access-control-allow-origin", _allowed_cors_origin()),
             (b"access-control-allow-methods", b"GET, POST, OPTIONS"),
             (b"access-control-allow-headers", b"Content-Type, Authorization, x-api-key"),
         ]
@@ -762,7 +759,7 @@ async def _send_cors_preflight(send):
         "type": "http.response.start",
         "status": 204,
         "headers": [
-            (b"access-control-allow-origin", b"*"),
+            (b"access-control-allow-origin", _allowed_cors_origin()),
             (b"access-control-allow-methods", b"GET, POST, PATCH, DELETE, OPTIONS"),
             (b"access-control-allow-headers", b"Content-Type, Authorization, x-api-key"),
             (b"access-control-max-age", b"86400"),

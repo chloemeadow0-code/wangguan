@@ -545,6 +545,18 @@ async def save_memory(title: str, content: str, category: str = "事件"):
     return f"✅ 记忆已保存: {title}"
 
 
+def _sanitize_postgrest_filter(text: str) -> str:
+    """转义 PostgREST 过滤器中的特殊字符，防止 or_/ilike 注入。
+    PostgREST 过滤语法中 , ( ). 等为保留字符，需转义以防止篡改查询逻辑。"""
+    if text is None:
+        return ""
+    # 先转义 SQL LIKE 通配符
+    text = str(text).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    # 再转义 PostgREST 过滤器分隔符（逗号、圆括号）
+    text = text.replace(",", "\\,").replace("(", "\\(").replace(")", "\\)")
+    return text
+
+
 @mcp.tool()
 @mcp_error_handler
 async def search_memory(query: str):
@@ -564,9 +576,10 @@ async def search_memory(query: str):
         pass
     # 2. 数据库关键词搜索
     if supabase:
+        safe_query = _sanitize_postgrest_filter(query)
         def _query():
             return supabase.table("memories").select("id, title, content, importance").or_(
-                f"title.ilike.%{query}%,content.ilike.%{query}%"
+                f"title.ilike.%{safe_query}%,content.ilike.%{safe_query}%"
             ).order("importance", desc=True).limit(5).execute()
         sb_res = await asyncio.to_thread(_query)
         if sb_res and sb_res.data:
@@ -578,12 +591,21 @@ async def search_memory(query: str):
     return "\n".join(ans_parts)
 
 
+# 🛡️ 受保护的系统键：只能由管理员通过环境变量修改，
+#    不允许通过 MCP 工具 / 面板写入（防止配置注入 / 凭据劫持）
+_PROTECTED_FACT_KEYS = {"sys_config", "sys_ai_persona", "llm_settings", "piggy_bank"}
+
+
 @mcp.tool()
 @mcp_error_handler
 async def manage_user_fact(key: str, value: str):
     """【管理用户画像】新增或更新一条用户事实 (key-value)。"""
     if not supabase:
         return "❌ 数据库未连接"
+    # 🛡️ 保护系统级配置键，防止通过工具劫持 LLM 配置 / 凭据
+    if not key or str(key).strip() in _PROTECTED_FACT_KEYS:
+        return f"❌ 该键「{key}」为系统保留键，不允许通过工具修改"
+    key = str(key).strip()
     def _upsert():
         return supabase.table("user_facts").upsert(
             {"key": key, "value": value, "confidence": 1.0}, on_conflict="key"
@@ -634,7 +656,8 @@ async def organize_knowledge_base(target: str, action: str, query_or_data: str =
                 res = await asyncio.to_thread(lambda: supabase.table("memories").select("id, created_at, category, title, content").order("created_at", desc=True).limit(20).execute())
                 return json.dumps(res.data, ensure_ascii=False, indent=2)
             elif action == "search":
-                res = await asyncio.to_thread(lambda: supabase.table("memories").select("id, title, content").or_(f"title.ilike.%{query_or_data}%,content.ilike.%{query_or_data}%").limit(15).execute())
+                safe_qod = _sanitize_postgrest_filter(query_or_data)
+                res = await asyncio.to_thread(lambda: supabase.table("memories").select("id, title, content").or_(f"title.ilike.%{safe_qod}%,content.ilike.%{safe_qod}%").limit(15).execute())
                 return json.dumps(res.data, ensure_ascii=False, indent=2)
             elif action == "read":
                 res = await asyncio.to_thread(lambda: supabase.table("memories").select("*").eq("id", query_or_data).execute())
@@ -1000,6 +1023,34 @@ async def memory_search_v2(persona_name: str, query: str, limit: int = 10):
     for r in rows:
         cat = r.get("category", "")
         lines.append(f"- ({cat}) {r.get('content', '')}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@mcp_error_handler
+async def memory_distill(assistant_id: str, text: str):
+    """
+    【提炼精华记忆】从给定文本中提取长期有价值的原子事实，写入 chat_messages（带去重/冲突检测）。
+    - assistant_id: 人设/线路名
+    - text: 要提炼的对话文本
+
+    提炼规则：只提取 关系/剧情/喜好/雷点/设定/档案，跳过寒暄/报错/重复解释。
+    人名规则：角色线必须写真实角色名，不能写 用户/助手/他/她/你/我。
+    """
+    from distill import run_distill
+    if not assistant_id or not text:
+        return "❌ assistant_id 和 text 不能为空"
+    result = await run_distill(assistant_id, text)
+    if not result.get("ok"):
+        return f"❌ 提炼失败: {result.get('error', '未知错误')}"
+    facts = result.get("facts", [])
+    stats = result.get("stats", {})
+    if not facts:
+        return f"📝 [{assistant_id}] 本轮无可提取的长期事实。"
+    lines = [f"🧠 [{assistant_id}] 提炼完成："]
+    lines.append(f"新增 {stats.get('new',0)} / 更新 {stats.get('updated',0)} / 冲突 {stats.get('conflict',0)} / 跳过 {stats.get('skipped',0)}")
+    for f in facts:
+        lines.append(f"  - {f}")
     return "\n".join(lines)
 
 

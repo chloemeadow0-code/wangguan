@@ -145,7 +145,7 @@ async def handle_get_personas(scope, send):
             })
         else:
             _log(f"❌ [panel] 查询人设失败: {e}")
-            await _send_json_resp(send, 500, {"error": str(e)})
+            await _send_json_resp(send, 500, {"error": "服务器内部错误"})
 
 
 async def handle_get_records(scope, send):
@@ -239,7 +239,7 @@ async def handle_get_records(scope, send):
             })
         else:
             _log(f"❌ [panel] 查询记录失败: {e}")
-            await _send_json_resp(send, 500, {"error": str(e)})
+            await _send_json_resp(send, 500, {"error": "服务器内部错误"})
 
 
 def _ensure_persona_exists(sb, assistant_id):
@@ -304,7 +304,7 @@ async def handle_post_record(scope, receive, send):
         try:
             content = _validate_chat_message_content(content, category)
         except ValueError as e:
-            await _send_json_resp(send, 400, {"error": str(e)})
+            await _send_json_resp(send, 400, {"error": "服务器内部错误"})
             return
         row["content"] = content
         # 从标签提取 category（若未显式给）
@@ -333,7 +333,7 @@ async def handle_post_record(scope, receive, send):
         await _send_json_resp(send, 200, {"ok": True, "record": created})
     except Exception as e:
         _log(f"❌ [panel] 新增失败: {e}")
-        await _send_json_resp(send, 500, {"error": str(e)})
+        await _send_json_resp(send, 500, {"error": "服务器内部错误"})
 
 
 async def handle_patch_record(scope, receive, send):
@@ -371,7 +371,7 @@ async def handle_patch_record(scope, receive, send):
             try:
                 content = _validate_chat_message_content(content, category)
             except ValueError as e:
-                await _send_json_resp(send, 400, {"error": str(e)})
+                await _send_json_resp(send, 400, {"error": "服务器内部错误"})
                 return
             update_fields["content"] = content
             if "category" in data:
@@ -403,7 +403,7 @@ async def handle_patch_record(scope, receive, send):
         await _send_json_resp(send, 200, {"ok": True})
     except Exception as e:
         _log(f"❌ [panel] 编辑失败: {e}")
-        await _send_json_resp(send, 500, {"error": str(e)})
+        await _send_json_resp(send, 500, {"error": "服务器内部错误"})
 
 
 async def handle_delete_record(scope, receive, send):
@@ -438,7 +438,52 @@ async def handle_delete_record(scope, receive, send):
         await _send_json_resp(send, 200, {"ok": True})
     except Exception as e:
         _log(f"❌ [panel] 删除失败: {e}")
-        await _send_json_resp(send, 500, {"error": str(e)})
+        await _send_json_resp(send, 500, {"error": "服务器内部错误"})
+
+
+# ==========================================
+# 人设/线路管理 CRUD
+# ==========================================
+
+# ==========================================
+# 精华提炼 API
+# ==========================================
+
+async def handle_post_distill(scope, receive, send):
+    """POST /api/panel/distill — 手动触发精华提炼
+    Body: { "assistant_id": "骆云影_联姻线", "text": "对话文本..." }
+    或:   { "assistant_id": "骆云影_联姻线", "from_archive": true, "limit": 10 }
+    """
+    try:
+        from distill import run_distill, distill_from_archive
+    except ImportError as e:
+        await _send_json_resp(send, 500, {"error": f"distill 模块导入失败: {e}"})
+        return
+
+    body = await _read_body(receive)
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except Exception:
+        await _send_json_resp(send, 400, {"error": "无效的 JSON"})
+        return
+
+    assistant_id = str(data.get("assistant_id", "")).strip()
+    if not assistant_id:
+        await _send_json_resp(send, 400, {"error": "assistant_id 不能为空"})
+        return
+
+    # 两种模式：直接给文本 / 从归档拉取
+    if data.get("from_archive"):
+        limit = int(data.get("limit", 10))
+        result = await distill_from_archive(assistant_id, limit)
+    else:
+        text = str(data.get("text", "")).strip()
+        if not text:
+            await _send_json_resp(send, 400, {"error": "text 不能为空（或设 from_archive=true 从归档提炼）"})
+            return
+        result = await run_distill(assistant_id, text)
+
+    await _send_json_resp(send, 200, result)
 
 
 # ==========================================
@@ -483,7 +528,7 @@ async def handle_post_persona(scope, receive, send):
             await _send_json_resp(send, 409, {"error": f"人设ID「{body.get('id','')}」已存在"})
         else:
             _log(f"❌ [panel] 新增人设失败: {e}")
-            await _send_json_resp(send, 500, {"error": str(e)})
+            await _send_json_resp(send, 500, {"error": "服务器内部错误"})
 
 
 async def handle_patch_persona(scope, receive, send):
@@ -536,7 +581,7 @@ async def handle_patch_persona(scope, receive, send):
             await _send_json_resp(send, 409, {"error": "激活冲突：请重试（系统已自动取消旧激活）"})
         else:
             _log(f"❌ [panel] 编辑人设失败: {e}")
-            await _send_json_resp(send, 500, {"error": str(e)})
+            await _send_json_resp(send, 500, {"error": "服务器内部错误"})
 
 
 async def handle_get_active_persona(scope, send):
@@ -558,7 +603,7 @@ async def handle_get_active_persona(scope, send):
             await _send_json_resp(send, 200, {"persona": None, "warning": "请先执行 migration_phase2_personas.sql"})
         else:
             _log(f"❌ [panel] 查询激活人设失败: {e}")
-            await _send_json_resp(send, 500, {"error": str(e)})
+            await _send_json_resp(send, 500, {"error": "服务器内部错误"})
 
 
 async def handle_delete_persona(scope, receive, send):
@@ -587,7 +632,7 @@ async def handle_delete_persona(scope, receive, send):
         await _send_json_resp(send, 200, {"ok": True})
     except Exception as e:
         _log(f"❌ [panel] 删除人设失败: {e}")
-        await _send_json_resp(send, 500, {"error": str(e)})
+        await _send_json_resp(send, 500, {"error": "服务器内部错误"})
 
 
 async def handle_panel_html(send):
@@ -608,7 +653,7 @@ async def handle_panel_html(send):
         })
         await send({"type": "http.response.body", "body": html.encode("utf-8")})
     except Exception as e:
-        await _send_json_resp(send, 500, {"error": str(e)})
+        await _send_json_resp(send, 500, {"error": "服务器内部错误"})
 
 
 # ==========================================
@@ -637,6 +682,8 @@ async def handle_panel_request(scope, receive, send):
             await handle_patch_persona(scope, receive, send)
         elif path == "/api/panel/persona" and method == "DELETE":
             await handle_delete_persona(scope, receive, send)
+        elif path == "/api/panel/distill" and method == "POST":
+            await handle_post_distill(scope, receive, send)
         elif path == "/api/panel/records" and method == "GET":
             await handle_get_records(scope, send)
         elif path == "/api/panel/record" and method == "POST":
@@ -649,4 +696,4 @@ async def handle_panel_request(scope, receive, send):
             await _send_json_resp(send, 404, {"error": f"未知的 panel 端点: {method} {path}"})
     except Exception as e:
         _log(f"❌ [panel] 未捕获异常: {e}")
-        await _send_json_resp(send, 500, {"error": f"服务器内部错误: {e}"})
+        await _send_json_resp(send, 500, {"error": "服务器内部错误"})

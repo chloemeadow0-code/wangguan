@@ -368,14 +368,19 @@ async def async_env_sync():
     from server import supabase, ORIGINAL_ENV
 
     print("⚙️ 环境变量热同步神经已上线...")
-    # 支持热同步的键列表 (可通过环境变量扩展)
+    # 🛡️ 白名单：只允许热同步非敏感配置。
+    #    禁止同步任何 *_API_KEY / *_SECRET / *_TOKEN / 凭据类变量，
+    #    防止数据库被污染后劫持服务端凭据。
     default_sync_keys = [
-        "DEFAULT_API_KEY", "DEFAULT_BASE_URL", "DEFAULT_MODEL_NAME",
-        "EMAIL_API_KEY", "EMAIL_FROM", "ADMIN_EMAIL",
-        "AI_PERSONA", "MEM0_USER_ID",
+        "AI_PERSONA", "MEM0_USER_ID", "USER_NAME", "USER_ID",
     ]
     extra_keys = [k.strip() for k in os.environ.get("SYNC_KEYS", "").split(",") if k.strip()]
-    sync_keys = list(set(default_sync_keys + extra_keys))
+    # 合并后过滤掉高危键（含 KEY/SECRET/TOKEN/PASSWORD 的绝对禁止）
+    _DANGEROUS_PATTERNS = ("KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL")
+    sync_keys = [
+        k for k in set(default_sync_keys + extra_keys)
+        if not any(p in k.upper() for p in _DANGEROUS_PATTERNS)
+    ]
 
     while True:
         try:

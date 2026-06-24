@@ -1,21 +1,21 @@
 # MCP Gateway Core
-mcp
-uvicorn
-python-dotenv
-starlette
-pydantic
-requests
+mcp>=1.2.0
+uvicorn>=0.30.0
+python-dotenv>=1.0.0
+starlette>=0.37.0
+pydantic>=2.7.0
+requests>=2.32.0
 
 # Database
-supabase
+supabase>=2.5.0
 
 # LLM SDK
-openai
+openai>=1.35.0
 
 # Vector Memory (Mem0 + Pinecone dual-write)
-mem0ai
-pinecone
+mem0ai>=0.1.30
+pinecone>=5.0.0
 
 # Web Search
-tavily-python
-duckduckgo-search
+tavily-python>=0.4.0
+duckduckgo-search>=6.1.0

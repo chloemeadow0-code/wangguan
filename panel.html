@@ -210,6 +210,7 @@
       <select id="fPageSize" onchange="loadList(1)" style="flex:0 0 auto">
         <option id="opt1"></option>
         <option id="opt2"></option>
+        <option id="opt3"></option>
       </select>
     </div>
   </div>
@@ -256,18 +257,18 @@ function toast(msg, type='') {
 
 function esc(s) {
   if (s === null || s === undefined) return '';
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 function fmtTime(t) {
   if (!t) return '';
   try {
     const d = new Date(t);
-    if (isNaN(d)) return t.slice(0,16);
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    if (isNaN(d)) return String(t).slice(0,16);
+    return String(d.getMonth()+1).padStart(2,'0')+'-'+
       String(d.getDate()).padStart(2,'0')+' '+String(d.getHours()).padStart(2,'0')+':'+
       String(d.getMinutes()).padStart(2,'0');
-  } catch(e) { return t; }
+  } catch(e) { return String(t); }
 }
 
 async function api(path, method='GET', body=null) {
@@ -351,14 +352,21 @@ function switchTab(tab) {
 function setupPageSizeOptions() {
   const o1 = document.getElementById('opt1');
   const o2 = document.getElementById('opt2');
+  const o3 = document.getElementById('opt3');
   if (currentTab === 'messages') {
+    // 精华记忆页：20 / 50（隐藏第三项）
     o1.value = '20'; o1.textContent = '20';
     o2.value = '50'; o2.textContent = '50';
+    if (o3) o3.hidden = true;
     if (!o2.selected && !o1.selected) o1.selected = true;
   } else {
+    // 对话归档页：5 / 10 / 20（与文档要求一致）
     o1.value = '5'; o1.textContent = '5';
     o2.value = '10'; o2.textContent = '10';
-    if (!o2.selected && !o1.selected) o1.selected = true;
+    if (o3) { o3.value = '20'; o3.textContent = '20'; o3.hidden = false; }
+    if (!o3 || !o3.selected) {
+      if (!o2.selected && !o1.selected) o1.selected = true;
+    }
   }
 }
 
