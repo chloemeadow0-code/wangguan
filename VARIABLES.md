@@ -13,15 +13,11 @@
 - [2. 数据库 (Supabase)](#2-数据库-supabase)
 - [3. 多模型 LLM](#3-多模型-llm)
 - [4. 向量记忆 (Mem0 + Pinecone)](#4-向量记忆-mem0--pinecone)
-- [5. 通讯渠道](#5-通讯渠道)
-- [6. Google 集成](#6-google-集成)
-- [7. 地图 / GPS](#7-地图--gps)
-- [8. 多媒体生成](#8-多媒体生成)
-- [9. 网页搜索](#9-网页搜索)
-- [10. 云端笔记 (WebDAV)](#10-云端笔记-webdav)
-- [11. NapCat QQ 接入](#11-napcat-qq-接入)
-- [12. 后台心跳调度](#12-后台心跳调度)
-- [13. 其他可选](#13-其他可选)
+- [5. 通讯渠道（邮件）](#5-通讯渠道邮件)
+- [6. 地图 / GPS](#6-地图--gps)
+- [7. 网页搜索](#7-网页搜索)
+- [8. 后台心跳调度](#8-后台心跳调度)
+- [9. 其他可选](#9-其他可选)
 - [最小可运行配置示例](#最小可运行配置示例)
 
 ---
@@ -46,14 +42,14 @@
 | `AI_NAME` | ❌ | `助手` | AI 角色称呼，注入到 system 提示与存库记录（如 `小橘`） |
 | `USER_ID` | ❌ | `default` | 用户隔离 ID（Mem0 向量记忆按此区分不同用户） |
 | `AI_PERSONA` | ❌ | 空 | AI 人设完整文本，会拼接到 system 提示最前面 |
-| `CHAT_TAG` | ❌ | `Web_Chat` | 存库时给本轮对话打的标签（用于区分网页/TG/QQ 渠道） |
-| `SUMMARY_THRESHOLD` | ❌ | `30` | 🆕 自动总结阈值：全渠道（网页/QQ/TG/邮件）对话流水累计达到该条数时，自动调用聊天模型（`main_chat`）生成第一人称阶段总结，存入 `Core_Cognition` 并归档旧记录。依赖 `CHAT_API_KEY`。 |
+| `CHAT_TAG` | ❌ | `Web_Chat` | 存库时给本轮对话打的标签（用于区分网页对话渠道） |
+| `SUMMARY_THRESHOLD` | ❌ | `30` | 🆕 自动总结阈值：网页对话流水累计达到该条数时，自动调用聊天模型（`main_chat`）生成第一人称阶段总结，存入 `Core_Cognition` 并归档旧记录。依赖 `CHAT_API_KEY`。 |
 
 ---
 
 ## 2. 数据库 (Supabase)
 
-记忆、画像、提醒、记忆小屋、记账、设备定位等持久化所需。
+记忆、画像、记忆小屋、记账、设备定位等持久化所需。
 
 | 变量名 | 必填 | 默认值 | 说明 |
 |--------|:---:|--------|------|
@@ -66,7 +62,7 @@
 
 ## 3. 多模型 LLM
 
-网关支持 5 个 LLM 角色，用 `switch_ai_brain` 工具可热切换默认角色。最小化配置只需 `OPENAI_*`。
+网关支持 4 个 LLM 角色，用 `switch_ai_brain` 工具可热切换默认角色。最小化配置只需 `OPENAI_*`。
 
 ### 3.1 默认 / 通用模型 (OpenAI 兼容) ⚠️ 已废弃
 
@@ -108,21 +104,14 @@
 | `VISION_BASE_URL` | ❌ | 空 |
 | `VISION_MODEL_NAME` | ❌ | `gpt-4o-mini` |
 
-### 3.5 语音模型 VOICE (STT 语音转文字)
-
-| 变量名 | 必填 | 默认值 |
-|--------|:---:|--------|
-| `VOICE_API_KEY` | ❌ | 回退到 `OPENAI_API_KEY` |
-| `VOICE_BASE_URL` | ❌ | `https://api.openai.com/v1` |
-
-### 3.6 向量嵌入 (Doubao / 硅基流动)
+### 3.5 向量嵌入 (Doubao / 硅基流动)
 
 | 变量名 | 必填 | 默认值 |
 |--------|:---:|--------|
 | `DOUBAO_API_KEY` | ❌ | 空 |
 | `DOUBAO_EMBEDDING_EP` | ❌ | 空（如 `BAAI/bge-m3`） |
 
-### 3.7 AI 人设
+### 3.6 AI 人设
 
 | 变量名 | 必填 | 默认值 |
 |--------|:---:|--------|
@@ -143,40 +132,20 @@
 
 ---
 
-## 5. 通讯渠道
+## 5. 通讯渠道（邮件）
 
-### 5.1 Telegram
-
-| 变量名 | 必填 | 默认值 | 说明 |
-|--------|:---:|--------|------|
-| `TG_BOT_TOKEN` | ❌ | 空 | Telegram Bot Token |
-| `TG_CHAT_ID` | ❌ | 空 | 默认推送目标（私聊 ID） |
-| `TG_GROUP_ID` | ❌ | 空 | 群组 ID（可选） |
-
-### 5.2 邮件 (Resend)
+### 5.1 邮件 (Resend)
 
 | 变量名 | 必填 | 默认值 | 兼容别名 |
 |--------|:---:|--------|---------|
 | `RESEND_API_KEY` | ❌ | 空 | — |
 | `MY_EMAIL` | ❌ | 空 | `ADMIN_EMAIL` |
-| `GMAIL_BRIDGE_URL` | ❌ | 空 | Gmail 桥接地址（供信箱巡视器轮询） |
+
+> ℹ️ 原有的 Telegram 推送、Gmail 桥接巡视器、Google 日历、NapCat QQ 接入等功能已移除。
 
 ---
 
-## 6. Google 集成
-
-Gmail 收发 & Google 日历。需要 Google OAuth 用户令牌。
-
-| 变量名 | 必填 | 默认值 | 说明 |
-|--------|:---:|--------|------|
-| `GOOGLE_USER_TOKEN_JSON` | ❌ | 空 | OAuth 用户令牌 JSON（序列化为单行字符串） |
-| `GOOGLE_CALENDAR_ID` | ❌ | `primary` | 目标日历 ID |
-
-> 最简单获取 `token.json` 的方式：本地用 Google 官方 [quickstart](https://developers.google.com/gmail/api/quickstart/python) 跑一次。
-
----
-
-## 7. 地图 / GPS
+## 6. 地图 / GPS
 
 高德地图服务，周边探索 / 天气。设备定位数据通过 Supabase 的 `device_data` 表写入。
 
@@ -186,28 +155,7 @@ Gmail 收发 & Google 日历。需要 Google OAuth 用户令牌。
 
 ---
 
-## 8. 多媒体生成
-
-### 8.1 AI 音乐 / 翻唱 (Replicate)
-
-| 变量名 | 必填 | 默认值 | 说明 |
-|--------|:---:|--------|------|
-| `REPLICATE_API_KEY` | ❌ | 空 | Replicate 官方 Token |
-| `MUSIC_MODEL_VERSION` | ❌ | 空 | 原创音乐模型 version hash |
-| `VOICE_MODEL_VERSION` | ❌ | 空 | RVC 翻唱音色模型 version hash |
-| `MUSIC_API_KEY` | ❌ | 空 | 其他音乐生成服务 Key（可选） |
-| `MUSIC_API_URL` | ❌ | 空 | 其他音乐生成服务地址（可选） |
-
-### 8.2 HTML 转图片 (HCTI)
-
-| 变量名 | 必填 | 默认值 |
-|--------|:---:|--------|
-| `HCTI_API_ID` | ❌ | 空 |
-| `HCTI_API_KEY` | ❌ | 空 |
-
----
-
-## 9. 网页搜索
+## 7. 网页搜索
 
 默认使用 DuckDuckGo 免费兜底（零配置）。配置 Tavily 后切换到高质量搜索。
 
@@ -217,67 +165,26 @@ Gmail 收发 & Google 日历。需要 Google OAuth 用户令牌。
 
 ---
 
-## 10. 云端笔记 (WebDAV)
+## 8. 后台心跳调度
 
-支持坚果云等 WebDAV 服务。
-
-| 变量名 | 必填 | 默认值 |
-|--------|:---:|--------|
-| `WEBDAV_URL` | ❌ | 空 |
-| `WEBDAV_USER` | ❌ | 空 |
-| `WEBDAV_PASSWORD` | ❌ | 空 |
-
----
-
-## 11. NapCat QQ 接入
-
-通过 [NapCat](https://github.com/NapNeko/NapCatQQ) 协议实现 QQ 机器人。
-
-| 变量名 | 必填 | 默认值 | 说明 |
-|--------|:---:|--------|------|
-| `NAPCAT_WS_URL` | ❌ | 空 | 正向 WS 地址（如 `ws://host:3001`） |
-| `NAPCAT_HTTP_URL` | ❌ | 空 | HTTP 回调地址 |
-| `NAPCAT_BOT_QQ` | ❌ | 空 | 机器人 QQ 号 |
-| `NAPCAT_TARGET_USER` | ❌ | 空 | 限定响应的私聊用户 QQ（留空则所有人可聊） |
-| `NAPCAT_NOTIFY_QQ` | ❌ | 空 | 掉线通知 QQ，多个用逗号分隔 |
-| `NAPCAT_NOTIFY_TG` | ❌ | 空 | 掉线同时通知 TG（`true`/`false`） |
-| `NAPCAT_ALLOWED_GROUPS` | ❌ | 空 | 允许响应的群号，逗号分隔 |
-| `NAPCAT_RECONNECT_DELAY` | ❌ | `5` | 重连初始延迟（秒） |
-| `NAPCAT_BACKOFF_FACTOR` | ❌ | `1.5` | 退避乘数 |
-| `NAPCAT_MAX_DELAY` | ❌ | `60` | 最大重连延迟（秒） |
-
----
-
-## 12. 后台心跳调度
-
-`heartbeat.py` 的主动问候、消息总结、日程播报相关。
+`heartbeat.py` 的主动问候、消息总结、日记生成等相关。
 
 | 变量名 | 必填 | 默认值 | 说明 |
 |--------|:---:|--------|------|
 | `HEARTBEAT_INTERVAL` | ❌ | `7200` | 主动问候间隔（秒） |
 | `SUMMARIZE_INTERVAL` | ❌ | `1800` | 消息总结间隔（秒） |
-| `SCHEDULE_MORNING_TIME` | ❌ | `07:30` | 日程早播时间 |
-| `SCHEDULE_EVENING_TIME` | ❌ | `22:00` | 日程晚播时间 |
 | `DIARY_TIME` | ❌ | `03:00` | 🆕 每日日记生成时间（24小时制）。到点自动拉取昨日全部对话流水，调用聊天模型（`main_chat`）生成第一人称"昨日回溯"日记，存入 Core_Cognition。启动时若发现昨日日记缺失会自动补写。依赖 CHAT_API_KEY。 |
 | `SYNC_KEYS` | ❌ | 空 | 额外热同步的环境变量键，逗号分隔 |
 
 ---
 
-## 13. 其他可选
+## 9. 其他可选
 
 | 变量名 | 必填 | 默认值 | 说明 |
 |--------|:---:|--------|------|
 | `MUTE_KEYWORDS` | ❌ | 空 | 触发静音的关键词，逗号分隔 |
 | `MUTE_DURATION` | ❌ | `300` | 静音持续秒数 |
-| `OCR_ENABLED` | ❌ | `false` | 是否开启 QQ 图片 OCR |
-| `OCR_MAX_IMAGES` | ❌ | `3` | 单次最多识别图片数 |
-| `SILICON_API_KEY` | ❌ | 空 | STT 语音识别 Key（硅基流动） |
-| `SILICON_STT_BASE_URL` | ❌ | 空 | STT 服务地址 |
-| `SILICON_STT_MODEL` | ❌ | 空 | STT 模型名 |
-| `MINIMAX_API_KEY` | ❌ | 空 | Minimax TTS 文字转语音 Key |
 | `ZEABUR_API_KEY` | ❌ | 空 | Zeabur 平台 API Token（API 触发重启） |
-| `NAPCAT_PROJECT_ID` | ❌ | 空 | Zeabur 项目 ID |
-| `NAPCAT_SERVICE_ID` | ❌ | 空 | Zeabur 服务 ID |
 
 ---
 
@@ -293,11 +200,9 @@ CHAT_API_KEY=sk-xxxxxxxx
 CHAT_MODEL_NAME=abab6.5s-chat
 # 注：OPENAI_* 已废弃，所有对话/总结统一用 CHAT_*，无需配置
 
-# 可选但推荐：数据库 + 推送
+# 可选但推荐：数据库
 SUPABASE_URL=https://xxxxx.supabase.co
 SUPABASE_KEY=eyJhbGci...
-TG_BOT_TOKEN=123456:ABC-DEF...
-TG_CHAT_ID=123456789
 AI_PERSONA=你是一个通用智能助手。
 ```
 

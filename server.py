@@ -5,9 +5,8 @@
 - 多工具注册 (@mcp.tool)
 - 多 LLM 客户端抽象
 - 数据库持久化 (Supabase)
-- 记忆 / 画像 / 提醒系统
-- 邮件 / 日历集成
-- 多渠道消息推送 (Telegram / QQ)
+- 记忆 / 画像系统
+- 邮件发送集成
 
 部署：直接运行 python server.py，或通过 uvicorn 部署。
 配置：所有敏感信息通过环境变量注入，请参考 .env.example。
@@ -203,12 +202,11 @@ def mcp_error_handler(func):
 def _get_llm_client(provider: str = "openai"):
     """
     多模型客户端工厂：按角色返回对应的 LLM 客户端。
-    完整还原原版 5 种 provider，所有密钥/地址/模型名均从环境变量读取。
+    完整还原原版 4 种 provider，所有密钥/地址/模型名均从环境变量读取。
     - openai    : 通用默认模型 (OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL_NAME)
     - main_chat : 主对话模型，可从数据库 llm_settings 动态覆盖 (CHAT_API_KEY / CHAT_BASE_URL / CHAT_MODEL_NAME)
     - silicon1  : 硅基流动便宜模型 (SILICON1_API_KEY / SILICON1_BASE_URL / SILICON1_MODEL_NAME)
     - vision    : 视觉/OCR 模型 (VISION_API_KEY / VISION_BASE_URL / VISION_MODEL_NAME)
-    - voice     : 语音/STT 模型，回退到 OPENAI (VOICE_API_KEY / VOICE_BASE_URL)
     """
     from openai import OpenAI
     client = None
@@ -237,10 +235,6 @@ def _get_llm_client(provider: str = "openai"):
         base_url = os.environ.get("VISION_BASE_URL", "").strip()
         client = OpenAI(api_key=api_key, base_url=base_url if base_url else None) if api_key else None
         model_name = os.environ.get("VISION_MODEL_NAME", "gpt-4o-mini")
-    elif provider == "voice":
-        api_key = os.environ.get("VOICE_API_KEY", os.environ.get("OPENAI_API_KEY", "")).strip()
-        base_url = os.environ.get("VOICE_BASE_URL", "https://api.openai.com/v1")
-        client = OpenAI(api_key=api_key, base_url=base_url) if api_key else None
     else:
         # 默认 openai provider
         api_key = os.environ.get("OPENAI_API_KEY", "").strip() or os.environ.get("DEFAULT_API_KEY", "").strip()
@@ -344,24 +338,10 @@ def _get_embedding(text: str):
 
 def _push_wechat(text: str, title: str = "通知"):
     """
-    通用消息推送函数。
-    默认通过 Telegram Bot 推送，可扩展为其他渠道。
-    所有凭证从环境变量读取。
+    通用消息推送占位函数（可在此接入其他推送渠道）。
+    保留签名以兼容调用方，不再实际推送。
     """
-    token = os.environ.get("TG_BOT_TOKEN", "").strip()
-    chat_id = os.environ.get("TG_CHAT_ID", "").strip()
-    if not token or not chat_id:
-        print(f"⚠️ 未配置 Telegram，跳过推送: {title}")
-        return
-    try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        requests.post(url, json={
-            "chat_id": chat_id,
-            "text": f"*{title}*\n\n{text}",
-            "parse_mode": "Markdown"
-        }, timeout=15)
-    except Exception as e:
-        print(f"⚠️ 推送失败: {e}")
+    return
 
 
 def _send_email_helper(subject: str, content: str, is_html: bool = False):
@@ -675,49 +655,6 @@ async def organize_knowledge_base(target: str, action: str, query_or_data: str =
 
 
 @mcp.tool()
-async def send_notification(content: str):
-    """【发送通知】通过配置的渠道 (Telegram 等) 推送消息。"""
-    return await asyncio.to_thread(_push_wechat, content, "通知")
-
-
-@mcp.tool()
-@mcp_error_handler
-async def manage_reminder(action: str, time_str: str = "", content: str = "", is_repeat: bool = False, reminder_id: str = ""):
-    """
-    【提醒管理】数据库持久版闹钟。
-    action: "add" | "delete" | "pause" | "resume" | "list"
-    """
-    if not supabase:
-        return "❌ 数据库未连接"
-    if action == "list":
-        res = await asyncio.to_thread(lambda: supabase.table("reminders").select("*").execute())
-        if not res or not res.data:
-            return "📭 当前没有提醒。"
-        ans = "📋 【提醒列表】:\n"
-        for r in res.data:
-            status = "⏸️ 暂停" if r.get('is_paused') else "▶️ 运行中"
-            ans += f"- ID: {r['id']} | {r['time_str']} | {status} | {r['content']}\n"
-        return ans
-    if action == "delete":
-        await asyncio.to_thread(lambda: supabase.table("reminders").delete().eq("id", reminder_id).execute())
-        return f"✅ 提醒 {reminder_id} 已删除。"
-    if action == "pause":
-        await asyncio.to_thread(lambda: supabase.table("reminders").update({"is_paused": True}).eq("id", reminder_id).execute())
-        return f"⏸️ 提醒 {reminder_id} 已暂停。"
-    if action == "resume":
-        await asyncio.to_thread(lambda: supabase.table("reminders").update({"is_paused": False}).eq("id", reminder_id).execute())
-        return f"▶️ 提醒 {reminder_id} 已恢复。"
-    if action == "add":
-        if not time_str or not content:
-            return "❌ 需要时间和内容。"
-        new_id = f"R{int(time.time())}"
-        data = {"id": new_id, "time_str": time_str, "content": content, "is_repeat": is_repeat, "is_paused": False, "last_fired": ""}
-        await asyncio.to_thread(lambda: supabase.table("reminders").insert(data).execute())
-        return f"✅ 提醒已创建！ID: {new_id}，时间: {time_str}，内容: {content}"
-    return "❌ 未知操作。"
-
-
-@mcp.tool()
 async def send_email_via_api(subject: str, content: str):
     """【发送邮件】通过配置的邮件服务发送通知邮件给管理员。"""
     return await asyncio.to_thread(_send_email_helper, subject, content)
@@ -760,203 +697,6 @@ async def web_search(query: str, max_results: int = 5):
         return ans
     except Exception as e:
         return f"❌ 搜索失败: {e}"
-
-
-# ==========================================
-# 邮件 & 日历集成 (通用 Gmail API 版)
-# ==========================================
-
-def _get_gmail_service():
-    """使用 OAuth Token 获取 Gmail API Service (从环境变量读取凭证)。"""
-    from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request
-    from googleapiclient.discovery import build
-    SCOPES = ['https://www.googleapis.com/auth/gmail.modify', 'https://www.googleapis.com/auth/gmail.send']
-    token_data = os.environ.get("GOOGLE_USER_TOKEN_JSON")
-    if not token_data:
-        return None
-    creds = Credentials.from_authorized_user_info(json.loads(token_data), SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return None
-    return build('gmail', 'v1', credentials=creds)
-
-
-def _parse_gmail_body(payload: dict) -> str:
-    """递归提取邮件纯文本正文，支持 HTML 清洗。"""
-    if payload.get('mimeType') == 'text/plain' and 'data' in payload.get('body', {}):
-        body_data = payload['body']['data']
-        body_data += "=" * ((4 - len(body_data) % 4) % 4)
-        return base64.urlsafe_b64decode(body_data).decode('utf-8', errors='ignore')
-    if payload.get('mimeType') == 'text/html' and 'data' in payload.get('body', {}):
-        body_data = payload['body']['data']
-        body_data += "=" * ((4 - len(body_data) % 4) % 4)
-        html_text = base64.urlsafe_b64decode(body_data).decode('utf-8', errors='ignore')
-        clean = re.sub(r'<style.*?>.*?</style>', '', html_text, flags=re.IGNORECASE | re.DOTALL)
-        clean = re.sub(r'<script.*?>.*?</script>', '', clean, flags=re.IGNORECASE | re.DOTALL)
-        clean = re.sub(r'<[^>]+>', '\n', clean)
-        return re.sub(r'\n\s*\n', '\n', clean).strip()
-    if 'parts' in payload:
-        for part in payload['parts']:
-            res = _parse_gmail_body(part)
-            if res:
-                return res
-    return ""
-
-
-@mcp.tool()
-async def check_inbox(max_results: int = 10, query: str = "label:INBOX"):
-    """【查收邮件】通过 Gmail API 获取收件箱邮件列表。"""
-    try:
-        service = await asyncio.to_thread(_get_gmail_service)
-        if not service:
-            return "❌ Gmail 未配置 (需设置 GOOGLE_USER_TOKEN_JSON)。"
-        def _fetch():
-            results = service.users().messages().list(userId='me', q=query, maxResults=max_results).execute()
-            messages = results.get('messages', [])
-            if not messages:
-                return "📭 信箱为空。"
-            out = []
-            for msg in messages:
-                m = service.users().messages().get(userId='me', id=msg['id'], format='metadata',
-                    metadataHeaders=['Subject', 'From', 'Date']).execute()
-                headers = m.get('payload', {}).get('headers', [])
-                subject = next((h['value'] for h in headers if h['name'] == 'Subject'), '无标题')
-                sender = next((h['value'] for h in headers if h['name'] == 'From'), '未知')
-                out.append(f"🆔 {msg['id']} | 📧 {subject} | 👤 {sender}")
-            return "\n".join(out)
-        return await asyncio.to_thread(_fetch)
-    except Exception as e:
-        return f"❌ 读取失败: {e}"
-
-
-@mcp.tool()
-async def read_full_email(message_id: str):
-    """【阅读邮件全文】根据邮件 ID 读取完整正文。"""
-    try:
-        service = await asyncio.to_thread(_get_gmail_service)
-        if not service:
-            return "❌ Gmail 未配置。"
-        def _read():
-            m = service.users().messages().get(userId='me', id=message_id, format='full').execute()
-            headers = m.get('payload', {}).get('headers', [])
-            subject = next((h['value'] for h in headers if h['name'] == 'Subject'), '无标题')
-            sender = next((h['value'] for h in headers if h['name'] == 'From'), '未知')
-            body = _parse_gmail_body(m.get('payload', {}))
-            return f"📧 {subject}\n👤 {sender}\n\n{body}"
-        return await asyncio.to_thread(_read)
-    except Exception as e:
-        return f"❌ 读取失败: {e}"
-
-
-@mcp.tool()
-async def reply_external_email(to_email: str, subject: str, content: str, thread_id: str = ""):
-    """【回复邮件】通过 Gmail API 发送邮件。"""
-    try:
-        service = await asyncio.to_thread(_get_gmail_service)
-        if not service:
-            return "❌ Gmail 未配置。"
-        def _send():
-            message = MIMEText(content)
-            message['to'] = to_email
-            message['subject'] = subject
-            raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-            body = {'raw': raw}
-            if thread_id:
-                body['threadId'] = thread_id
-            service.users().messages().send(userId='me', body=body).execute()
-            return True
-        await asyncio.to_thread(_send)
-        return f"✅ 邮件已发送至 {to_email}"
-    except Exception as e:
-        return f"❌ 发送失败: {e}"
-
-
-# ---------- Google 日历 ----------
-
-TARGET_CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID", "primary")
-
-def _get_calendar_service():
-    """获取 Google Calendar API Service。"""
-    from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request
-    from googleapiclient.discovery import build
-    token_data = os.environ.get("GOOGLE_USER_TOKEN_JSON")
-    if not token_data:
-        raise ValueError("未配置 GOOGLE_USER_TOKEN_JSON")
-    SCOPES = ['https://www.googleapis.com/auth/calendar']
-    creds = Credentials.from_authorized_user_info(json.loads(token_data), SCOPES)
-    if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-    return build('calendar', 'v3', credentials=creds)
-
-
-@mcp.tool()
-async def add_calendar_event(summary: str, description: str, start_time_iso: str, duration_minutes: int = 30):
-    """【添加日历】向 Google 日历添加新日程。"""
-    try:
-        def _add():
-            service = _get_calendar_service()
-            dt_start = datetime.datetime.fromisoformat(start_time_iso)
-            dt_end = dt_start + datetime.timedelta(minutes=duration_minutes)
-            event = {
-                'summary': summary, 'description': description,
-                'start': {'dateTime': start_time_iso},
-                'end': {'dateTime': dt_end.isoformat()},
-            }
-            return service.events().insert(calendarId=TARGET_CALENDAR_ID, body=event).execute()
-        res = await asyncio.to_thread(_add)
-        return f"✅ 日历已添加: {res.get('htmlLink')}"
-    except Exception as e:
-        return f"❌ 添加失败: {e}"
-
-
-@mcp.tool()
-async def get_calendar_events(time_min_iso: str = "", max_results: int = 5):
-    """【查询日历】获取接下来的日程。"""
-    try:
-        def _get():
-            service = _get_calendar_service()
-            t_min = time_min_iso or (datetime.datetime.utcnow().isoformat() + 'Z')
-            return service.events().list(
-                calendarId=TARGET_CALENDAR_ID, timeMin=t_min,
-                maxResults=max_results, singleEvents=True, orderBy='startTime'
-            ).execute().get('items', [])
-        events = await asyncio.to_thread(_get)
-        if not events:
-            return "📅 接下来没有日程。"
-        res = "📅 【近期日程】:\n"
-        for e in events:
-            start = e['start'].get('dateTime', e['start'].get('date'))
-            res += f"🔹 {start} | {e.get('summary', '无标题')} | ID: {e.get('id')}\n"
-        return res
-    except Exception as e:
-        return f"❌ 查询失败: {e}"
-
-
-@mcp.tool()
-async def modify_calendar_event(event_id: str, action: str, new_summary: str = "", new_start_iso: str = ""):
-    """【修改/删除日历】action: 'delete' | 'update'。"""
-    try:
-        def _mod():
-            service = _get_calendar_service()
-            if action == "delete":
-                service.events().delete(calendarId=TARGET_CALENDAR_ID, eventId=event_id).execute()
-                return "✅ 已删除"
-            elif action == "update":
-                event = service.events().get(calendarId=TARGET_CALENDAR_ID, eventId=event_id).execute()
-                if new_summary:
-                    event['summary'] = new_summary
-                if new_start_iso:
-                    event['start']['dateTime'] = new_start_iso
-                service.events().update(calendarId=TARGET_CALENDAR_ID, eventId=event_id, body=event).execute()
-                return "✅ 已更新"
-            return "❌ 未知操作"
-        return await asyncio.to_thread(_mod)
-    except Exception as e:
-        return f"❌ 操作失败: {e}"
 
 
 # ==========================================
@@ -1123,199 +863,6 @@ async def render_html_to_image(html_content: str, css_content: str = ""):
 
 
 # ==========================================
-# 坚果云 / WebDAV 笔记 (Obsidian)
-# ==========================================
-
-async def _scan_all_md_files():
-    """扫描 WebDAV 网盘所有 .md 笔记，返回 {文件名: 完整URL} 字典。"""
-    webdav_url = os.environ.get("WEBDAV_URL", "").strip()
-    webdav_user = os.environ.get("WEBDAV_USER", "").strip()
-    webdav_password = os.environ.get("WEBDAV_PASSWORD", "").strip()
-    if not all([webdav_url, webdav_user, webdav_password]):
-        return None, "❌ 未配置 WEBDAV_URL / WEBDAV_USER / WEBDAV_PASSWORD。"
-    import xml.etree.ElementTree as ET
-    from urllib.parse import unquote, urlparse
-    base_domain = "{0.scheme}://{0.netloc}".format(urlparse(webdav_url))
-    start_url = webdav_url.rstrip('/') + '/'
-
-    def _do_scan():
-        queue, visited, found = [start_url], set(), {}
-        while queue and len(visited) < 50:
-            current_url = queue.pop(0)
-            if current_url in visited:
-                continue
-            visited.add(current_url)
-            try:
-                res = requests.request("PROPFIND", current_url, auth=(webdav_user, webdav_password), headers={"Depth": "1"}, timeout=8)
-                if res.status_code not in (200, 207):
-                    continue
-                root = ET.fromstring(res.content)
-                for response in root:
-                    if not response.tag.endswith('response'):
-                        continue
-                    href, is_collection = "", False
-                    for child in response.iter():
-                        if child.tag.endswith('href'):
-                            href = unquote(child.text or "")
-                        if child.tag.endswith('collection'):
-                            is_collection = True
-                    if not href:
-                        continue
-                    full_url = href if href.startswith('http') else base_domain + href
-                    if full_url.rstrip('/') == current_url.rstrip('/'):
-                        continue
-                    if is_collection:
-                        if not full_url.endswith('/'):
-                            full_url += '/'
-                        if full_url not in visited:
-                            queue.append(full_url)
-                    elif href.endswith('.md'):
-                        clean_name = href.split('/')[-1].replace('.md', '')
-                        found[clean_name] = full_url
-            except Exception:
-                pass
-        return found
-    try:
-        files = await asyncio.to_thread(_do_scan)
-        return files, ""
-    except Exception as e:
-        return None, f"❌ 扫描失败: {e}"
-
-
-@mcp.tool()
-@mcp_error_handler
-async def list_obsidian_cloud():
-    """【查看云端笔记列表】扫描 WebDAV 网盘中所有 .md 笔记。"""
-    files_dict, err = await _scan_all_md_files()
-    if err:
-        return err
-    if not files_dict:
-        return "📭 未找到任何 .md 笔记。"
-    names = list(files_dict.keys())
-    return "📂 找到的笔记：\n" + "\n".join([f"- {f}" for f in names[:150]])
-
-
-@mcp.tool()
-@mcp_error_handler
-async def read_obsidian_cloud(file_name: str):
-    """【读取云端笔记】从 WebDAV 网盘读取指定笔记全文。file_name 无需 .md 后缀。"""
-    webdav_user = os.environ.get("WEBDAV_USER", "").strip()
-    webdav_password = os.environ.get("WEBDAV_PASSWORD", "").strip()
-    files_dict, err = await _scan_all_md_files()
-    if err:
-        return err
-    if file_name not in files_dict:
-        return f"❌ 未找到笔记【{file_name}】。"
-    target_url = files_dict[file_name]
-    def _read():
-        return requests.get(target_url, auth=(webdav_user, webdav_password), timeout=15)
-    resp = await asyncio.to_thread(_read)
-    if resp.status_code != 200:
-        return f"❌ 读取失败，状态码: {resp.status_code}"
-    content = resp.text
-    if len(content) > 3000:
-        content = content[:3000] + "\n\n...(内容过长已截断)"
-    return f"☁️ 笔记【{file_name}.md】:\n\n{content}"
-
-
-@mcp.tool()
-@mcp_error_handler
-async def write_obsidian_cloud(file_name: str, content: str, action: str = "append"):
-    """【写入云端笔记】向 WebDAV 网盘写入/追加内容。action: "append" | "overwrite"。"""
-    webdav_user = os.environ.get("WEBDAV_USER", "").strip()
-    webdav_password = os.environ.get("WEBDAV_PASSWORD", "").strip()
-    webdav_url = os.environ.get("WEBDAV_URL", "").strip()
-    if not all([webdav_url, webdav_user, webdav_password]):
-        return "❌ 未配置 WEBDAV 凭证。"
-    files_dict, err = await _scan_all_md_files()
-    if err:
-        return err
-    if file_name in files_dict:
-        target_url = files_dict[file_name]
-        if action == "append":
-            def _read_old():
-                return requests.get(target_url, auth=(webdav_user, webdav_password), timeout=15)
-            read_resp = await asyncio.to_thread(_read_old)
-            if read_resp.status_code == 200:
-                content = read_resp.text + "\n\n" + content
-    else:
-        from urllib.parse import quote
-        target_url = f"{webdav_url.rstrip('/')}/{quote(file_name + '.md')}"
-    def _write():
-        return requests.put(target_url, auth=(webdav_user, webdav_password), data=content.encode('utf-8'), timeout=15)
-    write_resp = await asyncio.to_thread(_write)
-    if write_resp.status_code in (200, 201, 204):
-        return f"✅ 已{ '追加' if action == 'append' else '覆盖' }写入《{file_name}.md》。"
-    return f"❌ 写入失败，状态码: {write_resp.status_code}"
-
-
-# ==========================================
-# AI 音乐 (Replicate RVC，可选)
-# ==========================================
-
-@mcp.tool()
-@mcp_error_handler
-async def compose_music(style: str, lyrics: str):
-    """【AI 作曲】根据风格和歌词生成一段音乐。需配置 REPLICATE_API_KEY 和 MUSIC_MODEL_VERSION。"""
-    repl_key = os.environ.get("REPLICATE_API_KEY", "").strip()
-    model_version = os.environ.get("MUSIC_MODEL_VERSION", "").strip()
-    if not repl_key or not model_version:
-        return "❌ 未配置 REPLICATE_API_KEY 或 MUSIC_MODEL_VERSION。"
-    def _compose():
-        resp = requests.post(
-            "https://api.replicate.com/v1/predictions",
-            headers={"Authorization": f"Token {repl_key}"},
-            json={"version": model_version, "input": {"prompt": f"{style} | {lyrics}", "duration": 15}},
-            timeout=15,
-        )
-        task = resp.json()
-        task_id = task.get("id")
-        if not task_id:
-            return f"❌ 提交失败: {task.get('detail', task)}"
-        for _ in range(40):
-            time.sleep(5)
-            status = requests.get(f"https://api.replicate.com/v1/predictions/{task_id}", headers={"Authorization": f"Token {repl_key}"}, timeout=15).json()
-            if status.get("status") == "succeeded":
-                return status.get("output", "")
-            if status.get("status") == "failed":
-                return f"❌ 生成失败: {status.get('error', '')}"
-        return "❌ 超时"
-    result = await asyncio.to_thread(_compose)
-    return f"🎵 音乐生成完成: {result}" if isinstance(result, str) and result.startswith("http") else result
-
-
-@mcp.tool()
-@mcp_error_handler
-async def cover_existing_song(song_url: str):
-    """【AI 翻唱】用配置的音色模型翻唱一首已有歌曲 (Replicate RVC)。需配置 REPLICATE_API_KEY 和 VOICE_MODEL_VERSION。"""
-    repl_key = os.environ.get("REPLICATE_API_KEY", "").strip()
-    model_version = os.environ.get("VOICE_MODEL_VERSION", "").strip()
-    if not repl_key or not model_version:
-        return "❌ 未配置 REPLICATE_API_KEY 或 VOICE_MODEL_VERSION。"
-    def _cover():
-        resp = requests.post(
-            "https://api.replicate.com/v1/predictions",
-            headers={"Authorization": f"Token {repl_key}"},
-            json={"version": model_version, "input": {"song_url": song_url}},
-            timeout=15,
-        )
-        task = resp.json()
-        task_id = task.get("id")
-        if not task_id:
-            return f"❌ 提交失败: {task.get('detail', task)}"
-        for _ in range(48):
-            time.sleep(5)
-            status = requests.get(f"https://api.replicate.com/v1/predictions/{task_id}", headers={"Authorization": f"Token {repl_key}"}, timeout=15).json()
-            if status.get("status") == "succeeded":
-                return status.get("output", "")
-            if status.get("status") == "failed":
-                return f"❌ 翻唱失败: {status.get('error', '')}"
-        return "❌ 超时"
-    result = await asyncio.to_thread(_cover)
-    return f"🎙️ 翻唱完成: {result}" if isinstance(result, str) and result.startswith("http") else result
-
-
-# ==========================================
 # 3.5 OrangeChat / 橘瓣记忆库工具 (按 assistant_id 隔离)
 # ==========================================
 # 这些工具配合 chat_messages / chat_archive / personas / persona_map 四张表使用
@@ -1474,19 +1021,13 @@ def _print_config_report():
         ("主对话 (CHAT)",     _ok("CHAT_API_KEY"),     os.environ.get("CHAT_MODEL_NAME", "未设置")),
         ("硅基 (SILICON1)",   _ok("SILICON1_API_KEY"), os.environ.get("SILICON1_MODEL_NAME", "未设置")),
         ("视觉 (VISION)",     _ok("VISION_API_KEY"),   os.environ.get("VISION_MODEL_NAME", "未设置")),
-        ("语音 (VOICE)",      _ok("VOICE_API_KEY") or _ok("OPENAI_API_KEY"), "已配置" if _ok("VOICE_API_KEY") or _ok("OPENAI_API_KEY") else "未配置"),
         ("数据库 (Supabase)", _ok("SUPABASE_URL") and _ok("SUPABASE_KEY"), "已连接" if supabase else "未连接"),
         ("长期记忆 (Mem0)",   _ok("MEM0_API_KEY"),     "已启用" if mem0_client.mem0 else "未配置"),
         ("向量库 (Pinecone)", _ok("PINECONE_API_KEY"), "已启用" if mem0_client.index else "未配置"),
         ("向量嵌入 (Doubao)", _ok("DOUBAO_API_KEY"),   "已配置" if _ok("DOUBAO_API_KEY") else "未配置"),
-        ("Telegram 推送",     _ok("TG_BOT_TOKEN") and _ok("TG_CHAT_ID"), "已配置" if _ok("TG_BOT_TOKEN") else "未配置 Token"),
-        ("Gmail/日历",        _ok("GOOGLE_USER_TOKEN_JSON"), "已配置 OAuth" if _ok("GOOGLE_USER_TOKEN_JSON") else "未配置 OAuth"),
         ("邮件发送 (Resend)", _ok("RESEND_API_KEY") and _ok("MY_EMAIL"), "已配置" if _ok("RESEND_API_KEY") else "未配置"),
-        ("QQ 机器人 (NapCat)",_ok("NAPCAT_WS_URL") or _ok("NAPCAT_HTTP_URL"), "已配置" if (_ok("NAPCAT_WS_URL") or _ok("NAPCAT_HTTP_URL")) else "未配置"),
         ("地图/GPS (高德)",    _ok("AMAP_API_KEY"),     "已配置" if _ok("AMAP_API_KEY") else "未配置"),
         ("网页搜索",          _ok("TAVILY_API_KEY"),   "Tavily" if _ok("TAVILY_API_KEY") else "DDG 免费兜底"),
-        ("AI 音乐 (Replicate)", _ok("REPLICATE_API_KEY"), "已配置" if _ok("REPLICATE_API_KEY") else "未配置"),
-        ("云端笔记 (WebDAV)", _ok("WEBDAV_URL") and _ok("WEBDAV_USER"), "已配置" if _ok("WEBDAV_URL") else "未配置"),
         ("HTML 转图 (HCTI)",  _ok("HCTI_API_ID"),       "已配置" if _ok("HCTI_API_ID") else "未配置"),
         ("接口安全密钥",      _ok("API_SECRET"),        "已配置" if _ok("API_SECRET") else "⚠️ 未配置(危险)"),
     ]

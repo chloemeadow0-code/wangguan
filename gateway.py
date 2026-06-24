@@ -68,15 +68,6 @@ class HostFixMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        # ---------- NapCat 反向 WebSocket 端点 ----------
-        if scope["type"] == "websocket" and scope["path"] == "/qq-ws":
-            try:
-                import napcat
-                await napcat.handle_napcat_ws(scope, receive, send)
-            except Exception as e:
-                _log(f"❌ NapCat WS 处理异常: {e}")
-            return
-
         # 非 HTTP 类型直接透传给下游
         if scope["type"] != "http":
             await self.app(scope, receive, send)
@@ -164,7 +155,7 @@ class HostFixMiddleware:
         if path == "/v1/models" and method == "GET":
             default_model = os.environ.get("OPENAI_MODEL_NAME", "gpt-3.5-turbo")
             models = [{"id": default_model, "object": "model", "created": int(time.time()), "owned_by": "mcp-gateway"}]
-            for prefix in ("CHAT_", "SILICON1_", "VISION_", "VOICE_"):
+            for prefix in ("CHAT_", "SILICON1_", "VISION_"):
                 mn = os.environ.get(f"{prefix}MODEL_NAME", "").strip()
                 if mn and mn != default_model:
                     models.append({"id": mn, "object": "model", "created": int(time.time()), "owned_by": "mcp-gateway"})
@@ -409,7 +400,7 @@ class HostFixMiddleware:
         # 最近对话历史（按 tag 拉，转成 user/assistant 交替）
         history_msgs = []
         try:
-            _TAGS = [chat_tag, "TG_MSG", "QQ_Chat", "QQ_Group", "Email_Process"]
+            _TAGS = [chat_tag]
             hr = await asyncio.to_thread(lambda: sb.table("memories").select("content, tags").in_("tags", _TAGS).order("created_at", desc=True).limit(20).execute())
             if hr and hr.data:
                 rows = list(reversed(hr.data))[-10:]
@@ -563,14 +554,89 @@ class HostFixMiddleware:
         except Exception as e:
             _log(f"⚠️ 橘瓣自动归档失败（不影响主流程）: {e}")
 
-        # 4. 🧠 异步触发全渠道统一对话总结（不阻塞响应）
-        #    监控网页/QQ/TG/邮件等所有渠道的对话流水，
+        # 4. 🧠 异步触发统一对话总结（不阻塞响应）
+        #    监控网页对话流水，
         #    累计达到 SUMMARY_THRESHOLD（默认30条）时自动总结归档。
         try:
-            import napcat
-            await napcat.check_and_summarize_all()
+            await _check_and_summarize_all(sb)
         except Exception as e:
             _log(f"⚠️ 触发对话总结失败（不影响主流程）: {e}")
+
+    async def _check_and_summarize_all(self, sb):
+        """🧠 统一对话总结机制
+        监控网页对话流水，当累计达到阈值（默认30条，可通过 SUMMARY_THRESHOLD 配置）时，
+        自动触发大模型总结并归档，生成阶段总结存入 Core_Cognition。
+        """
+        try:
+            threshold = int(os.environ.get("SUMMARY_THRESHOLD", "30"))
+            ai_name = os.environ.get("AI_NAME", "助手")
+            user_name = os.environ.get("USER_NAME", "用户")
+            chat_tag = os.environ.get("CHAT_TAG", "Web_Chat")
+
+            _MAX_MSG_CHARS = 500
+            _MAX_PROMPT_CHARS = 80000
+
+            def _check():
+                if not sb:
+                    return
+                all_chats = sb.table("memories").select("id, title, content, tags").eq("tags", chat_tag).order("created_at").execute()
+                if all_chats and all_chats.data and len(all_chats.data) >= threshold:
+                    items_to_summarize = all_chats.data[-threshold:]
+                    all_ids_to_archive = [item['id'] for item in all_chats.data]
+
+                    _log(f"📦 累计对话满 {len(all_chats.data)} 条，正在触发总结（取最新{threshold}条，归档全部）...")
+
+                    chat_parts = []
+                    total_chars = 0
+                    for item in items_to_summarize:
+                        truncated_content = item['content'][:_MAX_MSG_CHARS]
+                        part = f"[网页]{item['title']}: {truncated_content}"
+                        if total_chars + len(part) > _MAX_PROMPT_CHARS:
+                            _log(f"⚠️ 总结prompt已达 {_MAX_PROMPT_CHARS} 字符上限，截断剩余记录")
+                            break
+                        chat_parts.append(part)
+                        total_chars += len(part)
+
+                    chat_text = "\n".join(chat_parts)
+                    prompt = (
+                        f"以下是我们最近在网页的{len(chat_parts)}条对话记录：\n{chat_text}\n\n"
+                        f"请你以{ai_name}(我)的第一人称视角，提取核心要点，精炼地总结一下我们最近聊了什么、发生了什么。"
+                        f"⚠️严重警告：1. 必须严格区分清楚'{ai_name}(我)'做了什么，以及'{user_name}'做了什么，绝对不能把两人的话搞混！"
+                        f"2. 绝对禁止以'今天'开头！请扔掉日记格式，直接开门见山地叙述事情"
+                        f"（例如直接说：'{user_name}最近在忙...' 或 '我们刚才聊了...'）。"
+                    )
+                    client = _get_openai_client()
+                    if client:
+                        try:
+                            model_name = os.environ.get("CHAT_MODEL_NAME", os.environ.get("OPENAI_MODEL_NAME", "gpt-3.5-turbo"))
+                            summary = client.chat.completions.create(
+                                model=model_name,
+                                messages=[{"role": "user", "content": prompt}],
+                                temperature=0.7
+                            ).choices[0].message.content.strip()
+                            if summary:
+                                sb.table("memories").insert({
+                                    "title": "📚 全渠道阶段总结", "content": summary,
+                                    "category": "记事", "mood": "温情", "tags": "Core_Cognition"
+                                }).execute()
+                            sb.table("memories").update(
+                                {"tags": "Archived_Chat", "importance": 1}
+                            ).in_("id", all_ids_to_archive).execute()
+                            _log(f"✅ 对话总结完成，已归档 {len(all_ids_to_archive)} 条流水")
+                        except Exception as llm_err:
+                            _log(f"❌ 总结LLM调用失败: {llm_err}")
+                            sb.table("memories").update(
+                                {"tags": "Archived_Chat", "importance": 1}
+                            ).in_("id", all_ids_to_archive).execute()
+                            _log(f"✅ 虽然总结失败，但已将 {len(all_ids_to_archive)} 条旧记录归档")
+                    else:
+                        _log("⚠️ 未配置 CHAT_API_KEY，跳过总结（仅归档旧记录）")
+                        sb.table("memories").update(
+                            {"tags": "Archived_Chat", "importance": 1}
+                        ).in_("id", all_ids_to_archive).execute()
+            await asyncio.to_thread(_check)
+        except Exception as e:
+            _log(f"❌ 统一对话总结失败: {e}")
 
     # ------------------------------------------
     # 管理接口
@@ -586,6 +652,20 @@ class HostFixMiddleware:
 # ==========================================
 # 辅助函数
 # ==========================================
+
+def _get_openai_client():
+    """惰性创建 OpenAI 兼容客户端（用 CHAT_* 优先，回退 OPENAI_*）。"""
+    key = os.environ.get("CHAT_API_KEY", os.environ.get("OPENAI_API_KEY", "")).strip()
+    if not key:
+        return None
+    try:
+        from openai import OpenAI
+        base_url = os.environ.get("CHAT_BASE_URL", os.environ.get("OPENAI_BASE_URL", "")).strip() or None
+        return OpenAI(api_key=key, base_url=base_url)
+    except Exception as e:
+        _log(f"❌ 创建 OpenAI 客户端失败: {e}")
+        return None
+
 
 async def _check_api_secret(scope, send):
     """校验 API_SECRET。返回 True=通过，False=已拒绝(已发送 401)"""
