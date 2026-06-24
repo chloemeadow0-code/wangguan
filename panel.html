@@ -256,7 +256,7 @@ function toast(msg, type='') {
 
 function esc(s) {
   if (s === null || s === undefined) return '';
-  return String(s).replace(/&/g,'&').replace(/</g,'<').replace(/>/g,'>').replace(/"/g,'"');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 function fmtTime(t) {
@@ -264,7 +264,7 @@ function fmtTime(t) {
   try {
     const d = new Date(t);
     if (isNaN(d)) return t.slice(0,16);
-    return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
       String(d.getDate()).padStart(2,'0')+' '+String(d.getHours()).padStart(2,'0')+':'+
       String(d.getMinutes()).padStart(2,'0');
   } catch(e) { return t; }
@@ -277,6 +277,15 @@ async function api(path, method='GET', body=null) {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || ('HTTP '+res.status));
   return data;
+}
+
+function personaSelectOptions(selectedId) {
+  let opts = '<option value="">👥 请选择人设/线路</option>';
+  for (const p of personas) {
+    const sel = (selectedId && p.id === selectedId) ? ' selected' : '';
+    opts += `<option value="${esc(p.id)}"${sel}>${esc(p.display_name)}</option>`;
+  }
+  return opts;
 }
 
 // ==========================================
@@ -462,7 +471,6 @@ function renderPager(res) {
 // ==========================================
 function openAddModal() {
   const isMsg = currentTab === 'messages';
-  const personaList = personas.map(p => `<option value="${esc(p.id)}">`).join('');
   let catOpts = '';
   if (isMsg) {
     catOpts = `<label>分类</label><select id="mCategory">
@@ -479,8 +487,7 @@ function openAddModal() {
   document.getElementById('modalContent').innerHTML = `
     <h3>➕ 新增${isMsg?'精华记忆':'对话归档'}</h3>
     <label>人设/线路</label>
-    <input type="text" id="mPersona" list="personaDatalist" placeholder="输入或选择人设/线路名">
-    <datalist id="personaDatalist">${personaList}</datalist>
+    <select id="mPersona">${personaSelectOptions('')}</select>
     ${catOpts}
     <label>内容</label>
     <textarea id="mContent" placeholder="${ph}"></textarea>
@@ -495,7 +502,6 @@ function openEditModal(id) {
   const r = (window._recordsCache || []).find(x => x.id === id);
   if (!r) { toast('记录不存在', 'err'); return; }
   const isMsg = currentTab === 'messages';
-  const personaList = personas.map(p => `<option value="${esc(p.id)}">`).join('');
   let catField = '';
   if (isMsg) {
     catField = `<label>分类</label><select id="mCategory">
@@ -515,8 +521,7 @@ function openEditModal(id) {
   document.getElementById('modalContent').innerHTML = `
     <h3>✏️ 编辑</h3>
     <label>人设/线路</label>
-    <input type="text" id="mPersona" list="personaDatalist" value="${esc(r.assistant_id||'')}" placeholder="输入或选择人设/线路名">
-    <datalist id="personaDatalist">${personaList}</datalist>
+    <select id="mPersona">${personaSelectOptions(r.assistant_id || '')}</select>
     ${catField}
     <label>内容</label>
     <textarea id="mContent">${esc(r.content)}</textarea>
@@ -585,9 +590,6 @@ async function loadPersonas() {
       area.innerHTML = '<div class="empty"><span class="emoji">🎭</span>暂无人设，点击上方按钮新增</div>';
       return;
     }
-    // 找到当前激活的人设
-    const activeId = list.find(p => p.is_active === true)?.id;
-    // 更新顶栏激活人设徽标
     updateActivePersonaBadge(list);
 
     area.innerHTML = list.map(p => {
@@ -596,10 +598,8 @@ async function loadPersonas() {
         : '<span class="role-tag role-user" style="background:rgba(107,203,119,0.18);color:#16a34a">可见</span>';
       const isActive = p.is_active === true;
       const activeTag = isActive ? '<span class="role-tag role-assistant" style="background:rgba(255,126,179,0.2);color:var(--accent)">🌟 已激活</span>' : '';
-      // system_prompt 预览（截断）
       const sp = (p.system_prompt || '').trim();
       const spPreview = sp ? `<div class="item-content clamp" style="font-size:12px;color:var(--text-soft);max-height:3em;margin-top:4px">📝 ${esc(sp)}</div>` : '';
-      // 激活/取消按钮
       const activateBtn = isActive
         ? `<button class="btn btn-sm" onclick="toggleActivate('${esc(p.id)}', false)">⭐ 取消激活</button>`
         : `<button class="btn btn-sm btn-primary" onclick="toggleActivate('${esc(p.id)}', true)">🌟 设为当前</button>`;
@@ -633,7 +633,6 @@ async function toggleActivate(id, activate) {
 }
 
 async function updateActivePersonaBadge(list) {
-  // 从参数或 API 获取当前激活人设
   try {
     if (!list) {
       const res = await api('/api/panel/active_persona');
@@ -717,6 +716,12 @@ async function submitPersonaAdd() {
     await api('/api/panel/persona', 'POST', body);
     toast('人设已新增 🌸', 'ok');
     closeModal();
+    // 刷新本地 personas 缓存 + 筛选下拉
+    const res = await api('/api/panel/personas');
+    personas = res.personas || [];
+    const sel = document.getElementById('fPersona');
+    sel.innerHTML = '<option value="">👥 所有人设</option>' +
+      personas.map(p => `<option value="${esc(p.id)}">${esc(p.display_name)}</option>`).join('');
     loadPersonas();
   } catch(e) { toast('新增失败: '+e.message, 'err'); }
 }
@@ -733,6 +738,12 @@ async function submitPersonaEdit(id) {
     await api('/api/panel/persona', 'PATCH', body);
     toast('已保存 💕', 'ok');
     closeModal();
+    // 刷新本地 personas 缓存 + 筛选下拉
+    const res = await api('/api/panel/personas');
+    personas = res.personas || [];
+    const sel = document.getElementById('fPersona');
+    sel.innerHTML = '<option value="">👥 所有人设</option>' +
+      personas.map(p => `<option value="${esc(p.id)}">${esc(p.display_name)}</option>`).join('');
     loadPersonas();
   } catch(e) { toast('保存失败: '+e.message, 'err'); }
 }
@@ -742,6 +753,12 @@ async function delPersona(id) {
   try {
     await api('/api/panel/persona', 'DELETE', { id });
     toast('已删除 🗑️', 'ok');
+    // 刷新本地 personas 缓存 + 筛选下拉
+    const res = await api('/api/panel/personas');
+    personas = res.personas || [];
+    const sel = document.getElementById('fPersona');
+    sel.innerHTML = '<option value="">👥 所有人设</option>' +
+      personas.map(p => `<option value="${esc(p.id)}">${esc(p.display_name)}</option>`).join('');
     loadPersonas();
   } catch(e) { toast('删除失败: '+e.message, 'err'); }
 }
