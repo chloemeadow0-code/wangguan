@@ -120,12 +120,8 @@ async def handle_get_personas(scope, send):
     if not sb:
         await _send_json_resp(send, 500, {"error": "数据库未连接"})
         return
-    # 内置默认人设（表不存在或查询失败时的兜底）
-    DEFAULT_PERSONAS = [
-        {"id": "默认助手_技术线", "display_name": "默认助手_技术线", "sort_order": 10},
-        {"id": "骆云影_联姻线",   "display_name": "骆云影_联姻线",   "sort_order": 20},
-        {"id": "测试助手",       "display_name": "测试助手",       "sort_order": 30},
-    ]
+    # 表不存在时返回空列表（人设由用户在面板自行添加）
+    DEFAULT_PERSONAS = []
     try:
         show_all = (_parse_query(scope).get("all", "") == "1")
         def _q():
