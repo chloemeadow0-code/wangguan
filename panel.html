@@ -465,8 +465,6 @@ function openAddModal() {
     <input type="text" id="mPersona" list="personaDatalist" placeholder="输入或选择人设/线路名">
     <datalist id="personaDatalist">${personaList}</datalist>
     ${catOpts}
-    <label>会话ID（可选）</label>
-    <input type="text" id="mConvId" placeholder="conversation_id">
     <label>内容</label>
     <textarea id="mContent" placeholder="${ph}"></textarea>
     <div class="modal-actions">
@@ -503,8 +501,6 @@ function openEditModal(id) {
     <input type="text" id="mPersona" list="personaDatalist" value="${esc(r.assistant_id||'')}" placeholder="输入或选择人设/线路名">
     <datalist id="personaDatalist">${personaList}</datalist>
     ${catField}
-    <label>会话ID</label>
-    <input type="text" id="mConvId" value="${esc(r.conversation_id||'')}">
     <label>内容</label>
     <textarea id="mContent">${esc(r.content)}</textarea>
     <div class="modal-actions">
@@ -517,7 +513,6 @@ function openEditModal(id) {
 async function submitAdd() {
   const body = { table: currentTable(), content: document.getElementById('mContent').value.trim() };
   body.assistant_id = document.getElementById('mPersona').value;
-  body.conversation_id = document.getElementById('mConvId').value.trim();
   if (currentTab === 'messages') {
     body.category = document.getElementById('mCategory').value;
   } else {
@@ -535,7 +530,6 @@ async function submitEdit(id) {
   const body = { table: currentTable(), id };
   body.content = document.getElementById('mContent').value.trim();
   body.assistant_id = document.getElementById('mPersona').value;
-  body.conversation_id = document.getElementById('mConvId').value.trim();
   if (currentTab === 'messages') {
     body.category = document.getElementById('mCategory').value;
   } else {
