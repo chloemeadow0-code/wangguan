@@ -526,6 +526,15 @@ class HostFixMiddleware:
             except Exception as e:
                 _log(f"Mem0 写入失败: {e}")
 
+        # 3. 🧠 异步触发全渠道统一对话总结（不阻塞响应）
+        #    监控网页/QQ/TG/邮件等所有渠道的对话流水，
+        #    累计达到 SUMMARY_THRESHOLD（默认30条）时自动总结归档。
+        try:
+            import napcat
+            await napcat.check_and_summarize_all()
+        except Exception as e:
+            _log(f"⚠️ 触发对话总结失败（不影响主流程）: {e}")
+
     # ------------------------------------------
     # 管理接口
     # ------------------------------------------

@@ -321,8 +321,120 @@ async def _process_napcat_message(data: dict, send):
                     f"{sender.get('nickname', '未知')}: {clean_text}\n回复: {reply}",
                     "流水", "温柔", "QQ_MSG"
                 )
+
+            # 🧠 异步触发全渠道统一对话总结（不阻塞回复）
+            asyncio.create_task(check_and_summarize_all())
     except Exception as e:
         _naplog(f"❌ 处理 QQ 消息失败: {e}")
+
+
+# ==========================================
+# 5.1 全渠道自动总结机制
+# ==========================================
+
+async def check_and_summarize_all():
+    """🧠 全渠道统一对话总结机制
+    统一监控所有渠道（网页/QQ/TG/邮件）的对话流水，
+    当累计达到阈值（默认30条，可通过 SUMMARY_THRESHOLD 配置）时，
+    自动触发大模型总结并归档，生成阶段总结存入 Core_Cognition。
+
+    设计原则（移植自 mcp-gateway-main 并通用化）：
+    - 完全变量化（AI_NAME / USER_NAME / CHAT_TAG / SUMMARY_THRESHOLD）
+    - 单条消息截断 500 字，prompt 上限 8 万字，防止 token 爆炸
+    - 失败兜底：即使 LLM 调用失败，也把旧记录归档，防止无限重试堆积
+    - 全程 try/except 包裹，绝不影响主聊天流程
+    """
+    dep = _get_deps()
+    if not dep:
+        return
+    try:
+        # 配置项（全部从环境变量读取，保持通用化）
+        threshold = int(os.environ.get("SUMMARY_THRESHOLD", "30"))
+        ai_name = os.environ.get("AI_NAME", "助手")
+        user_name = os.environ.get("USER_NAME", "用户")
+        chat_tag = os.environ.get("CHAT_TAG", "Web_Chat")
+
+        _MAX_MSG_CHARS = 500       # 每条消息最多保留500字
+        _MAX_PROMPT_CHARS = 80000  # 整个prompt不超过8万字符（约2万token）
+
+        def _check():
+            if not getattr(dep, "supabase", None):
+                return
+            # 🌍 统一查询所有渠道的对话流水（CHAT_TAG 可配置，兼容网页/QQ/TG/邮件）
+            _ALL_CHAT_TAGS = [chat_tag, "QQ_MSG", "QQ_Chat", "QQ_Group", "TG_MSG", "Email_Process"]
+            all_chats = dep.supabase.table("memories").select("id, title, content, tags").in_("tags", _ALL_CHAT_TAGS).order("created_at").execute()
+            if all_chats and all_chats.data and len(all_chats.data) >= threshold:
+                # 只取最新的阈值条数，防止历史堆积导致token爆炸
+                items_to_summarize = all_chats.data[-threshold:]
+                # 将所有旧记录都归档（不仅仅是这批），防止下次再全量拉取
+                all_ids_to_archive = [item['id'] for item in all_chats.data]
+
+                _naplog(f"📦 全渠道累计对话满 {len(all_chats.data)} 条，正在触发统一总结（取最新{threshold}条，归档全部）...")
+
+                # 逐条截断，防止单条超长消息撑爆prompt
+                chat_parts = []
+                total_chars = 0
+                for item in items_to_summarize:
+                    truncated_content = item['content'][:_MAX_MSG_CHARS]
+                    tag = item.get('tags', '')
+                    # 标注消息来源渠道，帮助AI理解上下文
+                    channel_map = {
+                        chat_tag: "网页", "QQ_MSG": "QQ", "QQ_Chat": "QQ",
+                        "QQ_Group": "QQ群", "TG_MSG": "TG", "Email_Process": "邮件",
+                    }
+                    channel_label = channel_map.get(tag, tag)
+                    part = f"[{channel_label}]{item['title']}: {truncated_content}"
+                    if total_chars + len(part) > _MAX_PROMPT_CHARS:
+                        _naplog(f"⚠️ 总结prompt已达 {_MAX_PROMPT_CHARS} 字符上限，截断剩余 {len(items_to_summarize) - len(chat_parts)} 条记录")
+                        break
+                    chat_parts.append(part)
+                    total_chars += len(part)
+
+                chat_text = "\n".join(chat_parts)
+                prompt = (
+                    f"以下是我们最近在各个渠道（网页/QQ/TG/邮件）的{len(chat_parts)}条对话记录：\n{chat_text}\n\n"
+                    f"请你以{ai_name}(我)的第一人称视角，提取核心要点，精炼地总结一下我们最近聊了什么、发生了什么。"
+                    f"⚠️严重警告：1. 必须严格区分清楚'{ai_name}(我)'做了什么，以及'{user_name}'做了什么，绝对不能把两人的话搞混！"
+                    f"2. 绝对禁止以'今天'开头！因为这些聊天记录可能跨越了好几天。请扔掉日记格式，直接开门见山地叙述事情"
+                    f"（例如直接说：'{user_name}最近在忙...' 或 '我们刚才聊了...'）。"
+                )
+                client = dep._get_llm_client("silicon1")
+                if client:
+                    try:
+                        model_name = getattr(client, 'custom_model_name', "Qwen/Qwen2.5-7B-Instruct")
+                        summary = client.chat.completions.create(
+                            model=model_name,
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.7
+                        ).choices[0].message.content.strip()
+                        if hasattr(dep, "_save_memory_to_db"):
+                            dep._save_memory_to_db(
+                                f"📚 全渠道阶段总结", summary, "记事", "温情", "Core_Cognition"
+                            )
+                        # 归档所有旧记录，彻底防止下次重复拉取
+                        dep.supabase.table("memories").update(
+                            {"tags": "Archived_Chat", "importance": 1}
+                        ).in_("id", all_ids_to_archive).execute()
+                        _naplog(f"✅ 全渠道对话总结完成，已归档 {len(all_ids_to_archive)} 条流水")
+                    except Exception as llm_err:
+                        _naplog(f"❌ 统一总结LLM调用失败: {llm_err}")
+                        # 即使LLM调用失败，也把旧记录归档，防止无限重试堆积
+                        dep.supabase.table("memories").update(
+                            {"tags": "Archived_Chat", "importance": 1}
+                        ).in_("id", all_ids_to_archive).execute()
+                        _naplog(f"✅ 虽然总结失败，但已将 {len(all_ids_to_archive)} 条旧记录归档，防止下次继续堆积")
+                else:
+                    _naplog("⚠️ 未配置 SILICON1_API_KEY，跳过总结（仅归档旧记录）")
+                    dep.supabase.table("memories").update(
+                        {"tags": "Archived_Chat", "importance": 1}
+                    ).in_("id", all_ids_to_archive).execute()
+                    _naplog(f"✅ 已将 {len(all_ids_to_archive)} 条旧记录归档")
+            else:
+                total_count = len(all_chats.data) if all_chats and all_chats.data else 0
+                _naplog(f"📦 全渠道当前对话流水 {total_count} 条，未达{threshold}条总结阈值")
+        await asyncio.to_thread(_check)
+    except Exception as e:
+        _naplog(f"❌ 全渠道统一总结失败: {e}")
 
 
 async def _handle_poke_event(send, data, allowed_groups):

@@ -87,6 +87,223 @@ async def async_autonomous_life():
 
 
 # ==========================================
+# 1.5 每日日记生成 (深度睡眠模式)
+# ==========================================
+
+async def _perform_deep_dreaming():
+    """
+    🌙【深夜日记模式】每日自动生成"昨日回溯"日记。
+    拉取昨日全部对话流水 → 调用便宜模型生成第一人称日记 → 归档至 memories。
+    同时执行周/月/年三级宏观记忆收束（按日期条件触发）。
+    全程异常隔离，失败只记日志，不影响主流程。
+    """
+    from server import (
+        _get_llm_client, _ask_llm_async, _save_memory_to_db,
+        _send_email_helper, _get_now_bj, supabase, MemoryType
+    )
+
+    AI_NAME = os.environ.get("AI_NAME", "AI")
+    USER_NAME = os.environ.get("USER_NAME", "用户")
+
+    print("🌌 进入深度睡眠：正在整理昨日记忆，准备生成日记...")
+    try:
+        now_bj = _get_now_bj()
+        yesterday = (now_bj - datetime.timedelta(days=1)).date()
+        # 精确范围：[昨天0点, 今天0点)，避免拉到今天的数据
+        iso_start = f"{yesterday.isoformat()} 00:00:00"
+        iso_end = f"{now_bj.date().isoformat()} 00:00:00"
+
+        # 拉取昨日全部记忆（流水 + 已归档总结）
+        def _fetch_yesterday():
+            return supabase.table("memories").select(
+                "title, created_at, category, content, mood"
+            ).gt("created_at", iso_start).lt("created_at", iso_end).order("created_at").execute()
+
+        mem_res = await asyncio.to_thread(_fetch_yesterday)
+        if not mem_res.data:
+            print("🌌 昨日无记忆数据，跳过日记生成。")
+            return
+
+        # 拼接上下文（每条截断 500 字防 token 爆炸，整体上限 8 万字）
+        context = f"【昨日剧情 {yesterday}】:\n"
+        for m in mem_res.data:
+            content_preview = str(m.get('content', ''))[:500]
+            ctx_time = str(m.get('created_at', ''))[11:16]
+            context += f"[{ctx_time}] 【{m.get('title', '无题')}】 {content_preview} (Mood:{m.get('mood', '?')})\n"
+        if len(context) > 80000:
+            context = context[-80000:]
+
+        # 获取便宜模型客户端（复用自动总结同款，保持低成本）
+        client = _get_llm_client("silicon1")
+        if not client:
+            print("⚠️ 未配置 SILICON1_API_KEY，日记生成跳过（LLM 客户端缺失）。")
+            return
+
+        # 步骤1：生成每日日记（第一人称视角）
+        prompt_summary = (
+            f"{context}\n\n"
+            f"请以【{AI_NAME}】的第一人称视角，将上述碎片整理成一篇具体日记。"
+            f"⚠️严重警告：必须严格区分清楚【{AI_NAME}(我)】和【{USER_NAME}(对方)】各自说了什么、做了什么，"
+            f"绝对不能张冠李戴搞混主语！直接输出纯文本，勿加前言后语及格式符号。"
+        )
+        summary = await _ask_llm_async(client, prompt_summary, temperature=0.7)
+
+        if summary:
+            await asyncio.to_thread(
+                _save_memory_to_db,
+                f"📅 昨日回溯: {yesterday}", summary,
+                MemoryType.EMOTION, "平静", "Core_Cognition"
+            )
+            await asyncio.to_thread(_send_email_helper, f"📔 日记总结 ({yesterday})", summary)
+            print(f"✅ 日记已生成并归档: 📅 昨日回溯: {yesterday}")
+        else:
+            print("⚠️ 日记生成失败（LLM 返回空），跳过后续宏观收束。")
+            return
+
+        # 清理 2 天前的低重要度记录（防止流水单调累积）
+        try:
+            def _clean_old():
+                del_time = (now_bj - datetime.timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+                supabase.table("memories").delete().lt("importance", 4).lt("created_at", del_time).execute()
+            await asyncio.to_thread(_clean_old)
+        except Exception as e:
+            print(f"⚠️ 旧记忆清理失败（不影响日记）: {e}")
+
+        # === 宏观记忆收束体系 ===
+
+        # 1. 周度总结 (每周日触发)
+        if now_bj.weekday() == 6:
+            try:
+                week_ago = (now_bj - datetime.timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+                week_res = await asyncio.to_thread(
+                    lambda: supabase.table("memories").select("id, content").eq("tags", "Core_Cognition").gt("created_at", week_ago).execute()
+                )
+                if week_res.data and len(week_res.data) >= 3:
+                    week_context = "\n".join([f"- {w['content']}" for w in week_res.data])
+                    week_summary = await _ask_llm_async(
+                        client,
+                        f"【本周每日日记】:\n{week_context}\n\n请将这周的日记提炼成一篇深度的周度长期记忆总结。纯文本输出。",
+                        temperature=0.7
+                    )
+                    if week_summary:
+                        await asyncio.to_thread(
+                            _save_memory_to_db, "📚 周度记忆沉淀", week_summary,
+                            MemoryType.EMOTION, "温情", "Core_Cognition_Weekly"
+                        )
+                        await asyncio.to_thread(_send_email_helper, "📦 每周深度记忆归档", week_summary)
+                        print("✅ 周度记忆已沉淀。")
+            except Exception as e:
+                print(f"⚠️ 周度总结失败（不影响日记）: {e}")
+
+        # 2. 月度总结 (每月最后一天触发)
+        tomorrow = now_bj + datetime.timedelta(days=1)
+        if tomorrow.day == 1:
+            try:
+                month_ago = (now_bj - datetime.timedelta(days=32)).strftime("%Y-%m-%d %H:%M:%S")
+                month_res = await asyncio.to_thread(
+                    lambda: supabase.table("memories").select("id, content").eq("tags", "Core_Cognition_Weekly").gt("created_at", month_ago).execute()
+                )
+                if month_res.data:
+                    month_context = "\n".join([f"- {m['content']}" for m in month_res.data])
+                    month_summary = await _ask_llm_async(
+                        client,
+                        f"【本月周度记忆】:\n{month_context}\n\n请以【{AI_NAME}】的第一人称视角，提炼本月的核心大事件与情感走向，生成一篇月度回忆录。纯文本输出。",
+                        temperature=0.7
+                    )
+                    if month_summary:
+                        await asyncio.to_thread(
+                            _save_memory_to_db, "🌕 月度记忆沉淀", month_summary,
+                            MemoryType.EMOTION, "感慨", "Core_Cognition_Monthly"
+                        )
+                        await asyncio.to_thread(_send_email_helper, "📦 每月深度记忆归档", month_summary)
+                        # 阅后即焚：清理已归档的周总结
+                        m_ids = [m['id'] for m in month_res.data]
+                        await asyncio.to_thread(lambda: supabase.table("memories").delete().in_("id", m_ids).execute())
+                        print(f"✅ 月度记忆已沉淀，清理 {len(m_ids)} 条历史周总结。")
+            except Exception as e:
+                print(f"⚠️ 月度总结失败（不影响日记）: {e}")
+
+        # 3. 年度总结 (每年 12 月 31 日触发)
+        if now_bj.month == 12 and now_bj.day == 31:
+            try:
+                year_ago = (now_bj - datetime.timedelta(days=366)).strftime("%Y-%m-%d %H:%M:%S")
+                year_res = await asyncio.to_thread(
+                    lambda: supabase.table("memories").select("id, content").eq("tags", "Core_Cognition_Monthly").gt("created_at", year_ago).execute()
+                )
+                if year_res.data:
+                    year_context = "\n".join([f"- {y['content']}" for y in year_res.data])
+                    year_summary = await _ask_llm_async(
+                        client,
+                        f"【本年度月度记忆】:\n{year_context}\n\n请总结这一年的点点滴滴，写一篇年度回忆录。纯文本输出。",
+                        temperature=0.7
+                    )
+                    if year_summary:
+                        await asyncio.to_thread(
+                            _save_memory_to_db, "🌟 年度终极回忆录", year_summary,
+                            MemoryType.EMOTION, "感动", "Core_Cognition_Yearly"
+                        )
+                        await asyncio.to_thread(_send_email_helper, "📦 年度终极记忆归档", year_summary)
+                        y_ids = [y['id'] for y in year_res.data]
+                        await asyncio.to_thread(lambda: supabase.table("memories").delete().in_("id", y_ids).execute())
+                        print(f"✅ 年度记忆已沉淀，清理 {len(y_ids)} 条历史月总结。")
+            except Exception as e:
+                print(f"⚠️ 年度总结失败（不影响日记）: {e}")
+
+        print("✨ 深度睡眠完成，日记与宏观记忆已归档。")
+
+    except Exception as e:
+        print(f"❌ 深夜日记生成失败: {e}")
+
+
+async def async_diary_worker():
+    """
+    📔 每日日记生成器：独立协程，到指定时间自动触发深度日记生成。
+    - 启动时检查并补写昨日缺失的日记
+    - 每天到 DIARY_TIME（默认凌晨3点）自动触发
+    - 与主动问候循环解耦，互不干扰
+    """
+    from server import supabase
+
+    print("📔 每日日记生成神经已上线...")
+    diary_time = os.environ.get("DIARY_TIME", "03:00")
+    last_run_date = ""
+
+    # 启动时补写昨日日记（如果还没写过）
+    try:
+        if supabase:
+            now_bj = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+            yesterday = (now_bj - datetime.timedelta(days=1)).date()
+            target_title = f"📅 昨日回溯: {yesterday}"
+            def _check_diary():
+                return supabase.table("memories").select("id").eq("title", target_title).execute().data
+            exists = await asyncio.to_thread(_check_diary)
+            if not exists:
+                print(f"📝 检测到昨日日记缺失，立即补写: {target_title}")
+                await _perform_deep_dreaming()
+                last_run_date = now_bj.strftime("%Y-%m-%d")
+    except Exception as e:
+        print(f"❌ 启动补写日记失败: {e}")
+
+    while True:
+        try:
+            now_bj = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+            current_hm = now_bj.strftime("%H:%M")
+            current_date = now_bj.strftime("%Y-%m-%d")
+
+            if current_hm == diary_time and last_run_date != current_date:
+                last_run_date = current_date
+                print(f"📔 [{current_hm}] 到达日记生成时间，启动深度睡眠...")
+                await _perform_deep_dreaming()
+        except Exception as e:
+            print(f"❌ 日记生成器报错: {e}")
+
+        # 对齐到下一分钟
+        now = datetime.datetime.utcnow()
+        sleep_sec = 60 - now.second + 1
+        await asyncio.sleep(sleep_sec)
+
+
+# ==========================================
 # 2. Telegram 消息轮询
 # ==========================================
 
@@ -498,6 +715,7 @@ async def async_env_sync():
 def start_autonomous_life():
     """启动所有后台心跳线程 (daemon 模式，主进程退出时自动结束)。"""
     def _run_heartbeat(): asyncio.run(async_autonomous_life())
+    def _run_diary(): asyncio.run(async_diary_worker())
     def _run_tg_polling(): asyncio.run(async_telegram_polling())
     def _run_msg_sum(): asyncio.run(async_message_summarizer())
     def _run_reminders(): asyncio.run(async_reminder_worker())
@@ -507,6 +725,7 @@ def start_autonomous_life():
 
     threading.Thread(target=_run_env_sync, daemon=True).start()
     threading.Thread(target=_run_heartbeat, daemon=True).start()
+    threading.Thread(target=_run_diary, daemon=True).start()
     threading.Thread(target=_run_tg_polling, daemon=True).start()
     threading.Thread(target=_run_msg_sum, daemon=True).start()
     threading.Thread(target=_run_reminders, daemon=True).start()

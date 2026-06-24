@@ -47,6 +47,7 @@
 | `USER_ID` | ❌ | `default` | 用户隔离 ID（Mem0 向量记忆按此区分不同用户） |
 | `AI_PERSONA` | ❌ | 空 | AI 人设完整文本，会拼接到 system 提示最前面 |
 | `CHAT_TAG` | ❌ | `Web_Chat` | 存库时给本轮对话打的标签（用于区分网页/TG/QQ 渠道） |
+| `SUMMARY_THRESHOLD` | ❌ | `30` | 🆕 自动总结阈值：全渠道（网页/QQ/TG/邮件）对话流水累计达到该条数时，自动调用便宜模型（`SILICON1`）生成第一人称阶段总结，存入 `Core_Cognition` 并归档旧记录。依赖 `SILICON1_API_KEY`。 |
 
 ---
 
@@ -253,6 +254,7 @@ Gmail 收发 & Google 日历。需要 Google OAuth 用户令牌。
 | `SUMMARIZE_INTERVAL` | ❌ | `1800` | 消息总结间隔（秒） |
 | `SCHEDULE_MORNING_TIME` | ❌ | `07:30` | 日程早播时间 |
 | `SCHEDULE_EVENING_TIME` | ❌ | `22:00` | 日程晚播时间 |
+| `DIARY_TIME` | ❌ | `03:00` | 🆕 每日日记生成时间（24小时制）。到点自动拉取昨日全部对话流水，调用 SILICON1 便宜模型生成第一人称"昨日回溯"日记，存入 Core_Cognition。启动时若发现昨日日记缺失会自动补写。依赖 SILICON1_API_KEY。 |
 | `SYNC_KEYS` | ❌ | 空 | 额外热同步的环境变量键，逗号分隔 |
 
 ---
