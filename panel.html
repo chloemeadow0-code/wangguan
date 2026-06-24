@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -173,6 +173,7 @@
   <div class="tabs">
     <div class="tab active" data-tab="messages" onclick="switchTab('messages')">🧠 精华记忆</div>
     <div class="tab" data-tab="archive" onclick="switchTab('archive')">📜 对话归档</div>
+    <div class="tab" data-tab="personas" onclick="switchTab('personas')">🎭 人设管理</div>
   </div>
 
   <!-- 筛选栏 -->
@@ -217,6 +218,14 @@
 
   <!-- 分页 -->
   <div class="pager" id="pager"></div>
+
+  <!-- 人设管理区域 -->
+  <div class="list hidden" id="personaArea">
+    <div style="padding:4px 0 16px">
+      <button class="btn btn-primary" style="width:100%" onclick="openPersonaModal()">➕ 新增人设/线路</button>
+    </div>
+    <div id="personaList"></div>
+  </div>
 </div>
 
 <button class="fab hidden" id="fabAdd" onclick="openAddModal()">+</button>
@@ -548,6 +557,127 @@ async function delRecord(id) {
 }
 
 function closeModal() { document.getElementById('modalMask').classList.add('hidden'); }
+
+// ==========================================
+// 人设/线路管理
+// ==========================================
+async function loadPersonas() {
+  const area = document.getElementById('personaList');
+  area.innerHTML = '<div class="empty"><span class="emoji">⏳</span>加载中...</div>';
+  try {
+    const res = await fetch('/api/panel/personas?all=1', { headers: { 'x-api-key': API_KEY } });
+    const data = await res.json();
+    const list = data.personas || [];
+    if (list.length === 0) {
+      area.innerHTML = '<div class="empty"><span class="emoji">🎭</span>暂无人设，点击上方按钮新增</div>';
+      return;
+    }
+    area.innerHTML = list.map(p => {
+      const visTag = p.is_visible === false
+        ? '<span class="role-tag role-system" style="background:rgba(156,163,175,0.2);color:#6b7280">隐藏</span>'
+        : '<span class="role-tag role-user" style="background:rgba(107,203,119,0.18);color:#16a34a">可见</span>';
+      return `<div class="item">
+        <div class="item-head">
+          <span style="font-weight:700;font-size:15px">${esc(p.display_name)}</span>
+          ${visTag}
+          <span class="item-time">ID: ${esc(p.id)}</span>
+        </div>
+        <div class="item-content" style="font-size:12px;color:var(--text-soft)">排序: ${esc(p.sort_order!==undefined?p.sort_order:'-')}</div>
+        <div class="item-actions">
+          <button class="btn btn-sm" onclick="openPersonaEditModal('${esc(p.id)}')">✏️ 编辑</button>
+          <button class="btn btn-sm btn-danger" onclick="delPersona('${esc(p.id)}')">🗑️ 删除</button>
+        </div>
+      </div>`;
+    }).join('');
+    window._personaCache = list;
+  } catch(e) {
+    area.innerHTML = '<div class="empty"><span class="emoji">😢</span>'+esc(e.message)+'</div>';
+  }
+}
+
+function openPersonaModal() {
+  document.getElementById('modalContent').innerHTML = `
+    <h3>🎭 新增人设/线路</h3>
+    <label>人设ID（英文/数字，唯一，如 骆云影_联姻线）</label>
+    <input type="text" id="pId" placeholder="如：骆云影_联姻线">
+    <label>显示名称（面板上展示的名字）</label>
+    <input type="text" id="pName" placeholder="如：骆云影_联姻线">
+    <label>排序（数字越小越靠前）</label>
+    <input type="number" id="pSort" value="100">
+    <label>是否在筛选列表中可见</label>
+    <select id="pVisible">
+      <option value="true">✅ 可见</option>
+      <option value="false">🚫 隐藏</option>
+    </select>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitPersonaAdd()">💾 保存</button>
+    </div>`;
+  document.getElementById('modalMask').classList.remove('hidden');
+}
+
+function openPersonaEditModal(id) {
+  const p = (window._personaCache || []).find(x => x.id === id);
+  if (!p) { toast('人设不存在', 'err'); return; }
+  document.getElementById('modalContent').innerHTML = `
+    <h3>✏️ 编辑人设</h3>
+    <label>人设ID（不可修改）</label>
+    <input type="text" value="${esc(p.id)}" disabled style="opacity:0.6">
+    <label>显示名称</label>
+    <input type="text" id="pName" value="${esc(p.display_name)}">
+    <label>排序</label>
+    <input type="number" id="pSort" value="${esc(p.sort_order!==undefined?p.sort_order:100)}">
+    <label>是否可见</label>
+    <select id="pVisible">
+      <option value="true" ${p.is_visible!==false?'selected':''}>✅ 可见</option>
+      <option value="false" ${p.is_visible===false?'selected':''}>🚫 隐藏</option>
+    </select>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitPersonaEdit('${esc(p.id)}')">💾 保存</button>
+    </div>`;
+  document.getElementById('modalMask').classList.remove('hidden');
+}
+
+async function submitPersonaAdd() {
+  const body = {
+    id: document.getElementById('pId').value.trim(),
+    display_name: document.getElementById('pName').value.trim(),
+    sort_order: parseInt(document.getElementById('pSort').value) || 100,
+    is_visible: document.getElementById('pVisible').value === 'true',
+  };
+  if (!body.id || !body.display_name) { toast('ID 和名称不能为空', 'err'); return; }
+  try {
+    await api('/api/panel/persona', 'POST', body);
+    toast('人设已新增 🌸', 'ok');
+    closeModal();
+    loadPersonas();
+  } catch(e) { toast('新增失败: '+e.message, 'err'); }
+}
+
+async function submitPersonaEdit(id) {
+  const body = {
+    id,
+    display_name: document.getElementById('pName').value.trim(),
+    sort_order: parseInt(document.getElementById('pSort').value) || 100,
+    is_visible: document.getElementById('pVisible').value === 'true',
+  };
+  try {
+    await api('/api/panel/persona', 'PATCH', body);
+    toast('已保存 💕', 'ok');
+    closeModal();
+    loadPersonas();
+  } catch(e) { toast('保存失败: '+e.message, 'err'); }
+}
+
+async function delPersona(id) {
+  if (!confirm('确认删除人设「'+id+'」？\n\n注意：这不会删除该人设下的已有记忆数据，只是从人设列表中移除。')) return;
+  try {
+    await api('/api/panel/persona', 'DELETE', { id });
+    toast('已删除 🗑️', 'ok');
+    loadPersonas();
+  } catch(e) { toast('删除失败: '+e.message, 'err'); }
+}
 
 if (API_KEY) { document.getElementById('apiKey').value = API_KEY; }
 </script>

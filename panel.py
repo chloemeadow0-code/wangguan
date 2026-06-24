@@ -114,7 +114,7 @@ def _resolve_display_name(assistant_id: str, sb) -> str:
 # API 处理函数
 # ==========================================
 
-async def handle_get_personas(send):
+async def handle_get_personas(scope, send):
     """GET /api/panel/personas — 返回可见人设列表"""
     sb = _get_supabase()
     if not sb:
@@ -127,9 +127,12 @@ async def handle_get_personas(send):
         {"id": "测试助手",       "display_name": "测试助手",       "sort_order": 30},
     ]
     try:
+        show_all = (_parse_query(scope).get("all", "") == "1")
         def _q():
-            return sb.table("personas").select("id, display_name, sort_order") \
-                .eq("is_visible", True).order("sort_order").execute()
+            q = sb.table("personas").select("id, display_name, is_visible, sort_order")
+            if not show_all:
+                q = q.eq("is_visible", True)
+            return q.order("sort_order").execute()
         res = await asyncio.to_thread(_q)
         personas = res.data if res and res.data else []
         # 如果表里没数据，用默认人设兜底
@@ -419,6 +422,116 @@ async def handle_delete_record(scope, receive, send):
         await _send_json_resp(send, 500, {"error": str(e)})
 
 
+# ==========================================
+# 人设/线路管理 CRUD
+# ==========================================
+
+async def handle_post_persona(scope, receive, send):
+    """POST /api/panel/persona — 新增人设/线路"""
+    sb = _get_supabase()
+    if not sb:
+        await _send_json_resp(send, 500, {"error": "数据库未连接"})
+        return
+    try:
+        body = json.loads((await _read_body(receive)).decode("utf-8"))
+        pid = (body.get("id") or "").strip()
+        display_name = (body.get("display_name") or "").strip()
+        is_visible = body.get("is_visible", True)
+        sort_order = body.get("sort_order", 100)
+
+        if not pid or not display_name:
+            await _send_json_resp(send, 400, {"error": "id 和 display_name 不能为空"})
+            return
+        if len(pid) > 100:
+            await _send_json_resp(send, 400, {"error": "id 过长（最多100字符）"})
+            return
+
+        row = {
+            "id": pid,
+            "display_name": display_name,
+            "is_visible": bool(is_visible),
+            "sort_order": int(sort_order),
+        }
+        def _insert():
+            return sb.table("personas").insert(row).execute()
+        await asyncio.to_thread(_insert)
+        _log(f"✨ [panel] 新增人设: {pid} ({display_name})")
+        await _send_json_resp(send, 200, {"ok": True, "persona": row})
+    except Exception as e:
+        err_str = str(e).lower()
+        if "duplicate" in err_str or "23505" in err_str:
+            await _send_json_resp(send, 409, {"error": f"人设ID「{body.get('id','')}」已存在"})
+        else:
+            _log(f"❌ [panel] 新增人设失败: {e}")
+            await _send_json_resp(send, 500, {"error": str(e)})
+
+
+async def handle_patch_persona(scope, receive, send):
+    """PATCH /api/panel/persona — 编辑人设/线路"""
+    sb = _get_supabase()
+    if not sb:
+        await _send_json_resp(send, 500, {"error": "数据库未连接"})
+        return
+    try:
+        body = json.loads((await _read_body(receive)).decode("utf-8"))
+        pid = (body.get("id") or "").strip()
+        if not pid:
+            await _send_json_resp(send, 400, {"error": "id 不能为空"})
+            return
+
+        update_fields = {}
+        if "display_name" in body:
+            dn = (body.get("display_name") or "").strip()
+            if dn:
+                update_fields["display_name"] = dn
+        if "is_visible" in body:
+            update_fields["is_visible"] = bool(body["is_visible"])
+        if "sort_order" in body:
+            update_fields["sort_order"] = int(body["sort_order"])
+
+        if not update_fields:
+            await _send_json_resp(send, 400, {"error": "没有需要更新的字段"})
+            return
+
+        def _update():
+            return sb.table("personas").update(update_fields).eq("id", pid).execute()
+        await asyncio.to_thread(_update)
+        _log(f"📝 [panel] 编辑人设: {pid} → {update_fields}")
+        await _send_json_resp(send, 200, {"ok": True})
+    except Exception as e:
+        _log(f"❌ [panel] 编辑人设失败: {e}")
+        await _send_json_resp(send, 500, {"error": str(e)})
+
+
+async def handle_delete_persona(scope, receive, send):
+    """DELETE /api/panel/persona — 删除人设/线路"""
+    sb = _get_supabase()
+    if not sb:
+        await _send_json_resp(send, 500, {"error": "数据库未连接"})
+        return
+    try:
+        body = json.loads((await _read_body(receive)).decode("utf-8"))
+        pid = (body.get("id") or "").strip()
+        if not pid:
+            await _send_json_resp(send, 400, {"error": "id 不能为空"})
+            return
+
+        # 防止误删系统保留人设
+        _PROTECTED = {"diagnose", "debug", "manual", "unknown", "未映射"}
+        if pid in _PROTECTED:
+            await _send_json_resp(send, 403, {"error": f"系统保留人设「{pid}」不可删除"})
+            return
+
+        def _delete():
+            return sb.table("personas").delete().eq("id", pid).execute()
+        await asyncio.to_thread(_delete)
+        _log(f"🗑️ [panel] 删除人设: {pid}")
+        await _send_json_resp(send, 200, {"ok": True})
+    except Exception as e:
+        _log(f"❌ [panel] 删除人设失败: {e}")
+        await _send_json_resp(send, 500, {"error": str(e)})
+
+
 async def handle_panel_html(send):
     """GET /panel — 返回 HTML 面板"""
     try:
@@ -457,7 +570,13 @@ async def handle_panel_request(scope, receive, send):
 
     try:
         if path == "/api/panel/personas" and method == "GET":
-            await handle_get_personas(send)
+            await handle_get_personas(scope, send)
+        elif path == "/api/panel/persona" and method == "POST":
+            await handle_post_persona(scope, receive, send)
+        elif path == "/api/panel/persona" and method == "PATCH":
+            await handle_patch_persona(scope, receive, send)
+        elif path == "/api/panel/persona" and method == "DELETE":
+            await handle_delete_persona(scope, receive, send)
         elif path == "/api/panel/records" and method == "GET":
             await handle_get_records(scope, send)
         elif path == "/api/panel/record" and method == "POST":
