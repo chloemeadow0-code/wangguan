@@ -22,16 +22,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get purge -y --auto-remove gcc g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# 复制项目源码（napcat.py 已移除，distill.py 为必需模块）
-COPY server.py gateway.py heartbeat.py panel.py panel.html distill.py ./
+# 复制项目源码
+COPY server.py gateway.py heartbeat.py napcat.py ./
 
 # 暴露端口 (云平台通过 PORT 环境变量覆盖)
 ENV PORT=10000
 EXPOSE 10000
-
-# 🛡️ 安全：创建非特权用户并以该用户运行，避免容器内以 root 运行
-RUN useradd -m -u 1001 appuser
-USER appuser
 
 # 健康检查 (容器编排平台可用)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \

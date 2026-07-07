@@ -1,21 +1,32 @@
 # MCP Gateway Core
-mcp>=1.2.0
-uvicorn>=0.30.0
-python-dotenv>=1.0.0
-starlette>=0.37.0
-pydantic>=2.7.0
-requests>=2.32.0
+mcp
+uvicorn
+python-dotenv
+starlette
+pydantic
+requests
+websockets
 
 # Database
-supabase>=2.5.0
+supabase
 
 # LLM SDK
-openai>=1.35.0
+openai
 
-# Vector Memory (Mem0 + Pinecone dual-write)
-mem0ai>=0.1.30
-pinecone>=5.0.0
+# Vector Memory (Pinecone)
+pinecone
 
 # Web Search
-tavily-python>=0.4.0
-duckduckgo-search>=6.1.0
+tavily-python
+duckduckgo-search
+
+# Google Integration (Gmail / Calendar)
+google-auth
+google-auth-httplib2
+google-api-python-client
+
+# Multimedia (AI Music / Cover, optional)
+replicate
+
+# Audio (TG 语音条 TTS 回复所需，可选 — 不装则语音回复降级为文字)
+imageio-ffmpeg

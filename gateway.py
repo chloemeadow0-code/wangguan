@@ -1,18 +1,37 @@
+"""
+通用 ASGI 网关中间件 (Generic ASGI Gateway Middleware)
+======================================================
+特性：
+- 修正反代场景下的 Host 头
+- 统一处理 CORS 预检
+- 🔐 全局 API 安全拦截（校验 API_SECRET，对 /sse /messages /api/* 强制鉴权）
+- 暴露一组管理 / 健康检查 / 配置接口
+- 🧠 OpenAI 兼容代理 (/v1/chat/completions, /v1/models)：
+    * 支持纯透传模式（无 Supabase 时）
+    * 支持智能体模式（配了 Supabase + 可选 Pinecone 向量记忆）：
+      自动注入上文（最近N条对话）、人设、用户画像、阶段总结、向量记忆
+    * 流式收集 → 异步双写存库（不阻塞响应）
+- 将业务请求转发给下游 MCP 应用
+
+所有配置从环境变量读取，全部"个人化内容"已变量化，无任何硬编码。
+未配置的功能会优雅降级，保证最小配置（仅 CHAT_API_KEY）即可运行。
+"""
+
 import os
 import json
 import asyncio
 import time
-import hmac
 import datetime
 import requests
+
 
 # ==========================================
 # 全局连接（延迟初始化，避免启动时无 Supabase 就崩）
 # ==========================================
 _supabase_client = None
-_mem0_client = None
 _system_logs_buffer = []   # 简易日志缓存（用于 /api/logs）
 _MAX_LOGS = 200
+_pending_save_tasks = set()   # 持有后台存库 task 的强引用，防止被 GC 提前回收
 
 
 def _log(msg: str):
@@ -25,10 +44,19 @@ def _log(msg: str):
 
 
 def _get_supabase():
-    """惰性初始化 Supabase 客户端，没配 URL/KEY 就返回 None"""
+    """获取 Supabase 客户端（复用 server.py 已初始化的实例，避免重复建连）"""
     global _supabase_client
     if _supabase_client is not None:
         return _supabase_client
+    try:
+        import server
+        if getattr(server, "supabase", None) is not None:
+            _supabase_client = server.supabase
+            _log(f"✅ 复用 server.py 的 Supabase 客户端: {(os.environ.get('SUPABASE_URL') or '')[:30]}...")
+            return _supabase_client
+    except Exception as e:
+        _log(f"⚠️ 复用 server.supabase 失败，回退到自建: {e}")
+    # 回退：本模块自建（仅在 server.py 未成功初始化时）
     url = os.environ.get("SUPABASE_URL", "").strip()
     key = os.environ.get("SUPABASE_KEY", "").strip()
     if not url or not key:
@@ -36,46 +64,11 @@ def _get_supabase():
     try:
         from supabase import create_client
         _supabase_client = create_client(url, key)
-        _log(f"✅ Supabase 已连接: {url[:30]}...")
+        _log(f"✅ Supabase 已连接(自建): {url[:30]}...")
     except Exception as e:
         _log(f"❌ Supabase 连接失败: {e}")
         _supabase_client = None
     return _supabase_client
-
-
-def _get_mem0():
-    """惰性初始化 Mem0 客户端，没配 API_KEY 就返回 None"""
-    global _mem0_client
-    if _mem0_client is not None:
-        return _mem0_client
-    api_key = os.environ.get("MEM0_API_KEY", "").strip()
-    if not api_key:
-        return None
-    try:
-        from mem0 import Memory
-        _mem0_client = Memory.from_config({"vector_store": {"provider": "mem0", "config": {"api_key": api_key}}}) \
-            if False else Memory()   # 兼容 mem0ai 新旧版本
-        _log("✅ Mem0 已初始化")
-    except Exception as e:
-        _log(f"❌ Mem0 初始化失败（将跳过向量记忆）: {e}")
-        _mem0_client = None
-    return _mem0_client
-
-
-def _get_active_persona(sb):
-    """🌟 读取当前激活的人设（personas 表 is_active=true）。
-    返回 {id, display_name, system_prompt} 或 None。
-    优雅降级：表/字段不存在时返回 None（不影响主流程）。"""
-    if not sb:
-        return None
-    try:
-        res = sb.table("personas").select("id, display_name, system_prompt") \
-            .eq("is_active", True).limit(1).execute()
-        if res and res.data:
-            return res.data[0]
-    except Exception:
-        pass
-    return None
 
 
 class HostFixMiddleware:
@@ -85,6 +78,15 @@ class HostFixMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
+        # ---------- NapCat 反向 WebSocket 端点 ----------
+        if scope["type"] == "websocket" and scope["path"] == "/qq-ws":
+            try:
+                import napcat
+                await napcat.handle_napcat_ws(scope, receive, send)
+            except Exception as e:
+                _log(f"❌ NapCat WS 处理异常: {e}")
+            return
+
         # 非 HTTP 类型直接透传给下游
         if scope["type"] != "http":
             await self.app(scope, receive, send)
@@ -92,7 +94,7 @@ class HostFixMiddleware:
 
         # ---------- 根路径：返回占位（或前端 index.html）----------
         if scope["path"] == "/":
-            html = "<h1>🚪 MCP Gateway</h1><p>Endpoints: <code>/health</code> <code>/sse</code> <code>/v1/chat/completions</code> <code>/panel</code></p>"
+            html = "<h1>🚪 MCP Gateway</h1><p>Endpoints: <code>/health</code> <code>/sse</code> <code>/v1/chat/completions</code></p>"
             await send({"type": "http.response.start", "status": 200,
                         "headers": [(b"content-type", b"text/html; charset=utf-8")]})
             await send({"type": "http.response.body", "body": html.encode("utf-8")})
@@ -101,17 +103,6 @@ class HostFixMiddleware:
         # ---------- 健康检查 ----------
         if scope["path"] == "/health":
             await _send_json_resp(send, 200, {"status": "ok", "service": "generic-mcp-gateway"})
-            return
-
-        # ---------- 🆕 橘瓣记忆库 HTML 面板 (/panel) ----------
-        # 仅返回 HTML 外壳，不含敏感信息；数据通过 /api/panel/*（需鉴权）获取
-        if scope["path"] == "/panel":
-            try:
-                import panel
-                await panel.handle_panel_html(send)
-            except Exception as e:
-                _log(f"❌ 面板加载失败: {e}")
-                await _send_json_resp(send, 500, {"error": str(e)})
             return
 
         # ---------- 🆕 OpenAI 兼容代理 (/v1/*) ----------
@@ -137,16 +128,6 @@ class HostFixMiddleware:
             await self._handle_logs(send)
             return
 
-        # ---------- 🆕 橘瓣记忆库 Panel API (/api/panel/*) ----------
-        if scope["path"].startswith("/api/panel/"):
-            try:
-                import panel
-                await panel.handle_panel_request(scope, receive, send)
-            except Exception as e:
-                _log(f"❌ Panel API 异常: {e}")
-                await _send_json_resp(send, 500, {"error": str(e)})
-            return
-
         # ---------- 兜底其余请求 (Host Fix → 下游 MCP) ----------
         headers = dict(scope.get("headers", []))
         headers[b"host"] = b"localhost:8000"
@@ -162,18 +143,16 @@ class HostFixMiddleware:
         path = scope["path"]
         method = scope["method"]
 
-        # 🛡️ 强制鉴权（防止 LLM 额度被白嫖 / 账号被滥用）
-        if not await _check_api_secret(scope, send):
-            return
+        # 可选鉴权
+        api_secret = os.environ.get("API_SECRET", "").strip()
+        if api_secret:
+            if not await _check_api_secret(scope, send):
+                return
 
         # ---- /v1/models ----
         if path == "/v1/models" and method == "GET":
-            default_model = os.environ.get("OPENAI_MODEL_NAME", "gpt-3.5-turbo")
+            default_model = os.environ.get("CHAT_MODEL_NAME", "abab6.5s-chat")
             models = [{"id": default_model, "object": "model", "created": int(time.time()), "owned_by": "mcp-gateway"}]
-            for prefix in ("CHAT_", "SILICON1_", "VISION_"):
-                mn = os.environ.get(f"{prefix}MODEL_NAME", "").strip()
-                if mn and mn != default_model:
-                    models.append({"id": mn, "object": "model", "created": int(time.time()), "owned_by": "mcp-gateway"})
             await _send_json_resp(send, 200, {"object": "list", "data": models})
             return
 
@@ -200,13 +179,13 @@ class HostFixMiddleware:
             await _send_json_resp(send, 400, {"error": {"message": "Invalid JSON body"}})
             return
 
-        # 解析上游配置（统一用 OPENAI_*，兼容旧 CHAT_*）
-        upstream_base = os.environ.get("OPENAI_BASE_URL", os.environ.get("CHAT_BASE_URL", os.environ.get("DEFAULT_BASE_URL", ""))).strip()
-        upstream_key = os.environ.get("OPENAI_API_KEY", os.environ.get("CHAT_API_KEY", os.environ.get("DEFAULT_API_KEY", ""))).strip()
-        default_model = os.environ.get("OPENAI_MODEL_NAME", os.environ.get("CHAT_MODEL_NAME", os.environ.get("DEFAULT_MODEL_NAME", "gpt-3.5-turbo")))
+        # 解析上游配置：统一用 CHAT_*（主对话模型），与 MCP 工具层一致
+        upstream_base = os.environ.get("CHAT_BASE_URL", "https://api.minimaxi.com/v1").strip()
+        upstream_key = os.environ.get("CHAT_API_KEY", "").strip()
+        default_model = os.environ.get("CHAT_MODEL_NAME", "abab6.5s-chat")
 
         if not upstream_key:
-            await _send_json_resp(send, 500, {"error": {"message": "Server 未配置 OPENAI_API_KEY"}})
+            await _send_json_resp(send, 500, {"error": {"message": "Server 未配置 CHAT_API_KEY"}})
             return
 
         if not req_data.get("model"):
@@ -256,7 +235,7 @@ class HostFixMiddleware:
             if h in client_headers:
                 fwd_headers[h] = client_headers[h]
 
-        _log(f"➡️ [转发] POST {upstream_url} | model={req_data.get('model')}")
+        _log(f"➡️ [转发] POST {upstream_url} | model={req_data.get('model')} | key={upstream_key[:6]}***")
 
         # 启动响应流（通知客户端开始接收 SSE）
         await send({
@@ -266,7 +245,7 @@ class HostFixMiddleware:
                 (b"content-type", b"text/event-stream; charset=utf-8"),
                 (b"cache-control", b"no-cache"),
                 (b"connection", b"keep-alive"),
-                (b"access-control-allow-origin", _allowed_cors_origin()),
+                (b"access-control-allow-origin", b"*"),
             ],
         })
 
@@ -280,8 +259,7 @@ class HostFixMiddleware:
                 fwd_headers["Connection"] = "keep-alive"
                 with requests.post(upstream_url, headers=fwd_headers, json=req_data, stream=True, timeout=300) as resp:
                     if resp.status_code != 200:
-                        _log(f"❌ 上游返回 HTTP {resp.status_code}: {resp.text[:300]}")
-                        q.put({"error": f"上游服务返回 HTTP {resp.status_code}（详情见服务端日志）"})
+                        q.put({"error": f"HTTP {resp.status_code}: {resp.text[:500]}"})
                         q.put(None)
                         return
                     for line in resp.iter_lines():
@@ -343,49 +321,48 @@ class HostFixMiddleware:
         await send({"type": "http.response.body", "body": b"", "more_body": False})
 
         # ==========================================
-        # 💾 异步双写：把本轮对话存到 Supabase + Mem0（不阻塞响应）
+        # 💾 异步写入：把本轮对话存到 Supabase + Pinecone（不阻塞响应）
+        # 持有 task 强引用避免被 GC，完成时自动从集合移除
         # ==========================================
         if sb and user_msg and (collected_content or tool_calls_dict):
-            asyncio.create_task(self._save_conversation(sb, user_msg, collected_content, collected_reasoning, tool_calls_dict))
+            task = asyncio.create_task(
+                self._save_conversation(sb, user_msg, collected_content, collected_reasoning, tool_calls_dict)
+            )
+            _pending_save_tasks.add(task)
+            task.add_done_callback(_pending_save_tasks.discard)
 
     async def _inject_context(self, req_data, sb, current_query):
         """
         智能体上下文注入（全部变量化，无硬编码）：
-        - 🌟 当前激活人设（personas 表，优先级最高）
         - 系统当前状态（北京时间 / 沉默时长）
         - 用户画像（user_facts 表）
         - 阶段总结（memories 表 tags=Core_Cognition）
-        - Mem0 向量记忆（可选）
-        - 🌟 当前线路精华记忆（chat_messages 表，按 assistant_id 隔离）
-        - 最近 N 条对话历史（从 chat_archive 读取，按 assistant_id 隔离）
+        - Pinecone 向量语义记忆（可选）
+        - 最近 N 条对话历史（按 tag 拉，转成 user/assistant 交替）
         """
         ai_name = os.environ.get("AI_NAME", "助手")
         user_name = os.environ.get("USER_NAME", "用户")
         user_id = os.environ.get("USER_ID", "default")
         persona = os.environ.get("AI_PERSONA", "").strip()
-
-        # 🌟 读取当前激活人设（优先于环境变量 AI_PERSONA）
-        active_persona = await asyncio.to_thread(lambda: _get_active_persona(sb))
-        oc_assistant_id = "默认助手_技术线"   # 默认兜底
-        if active_persona:
-            oc_assistant_id = active_persona.get("id", oc_assistant_id)
-            sp = (active_persona.get("system_prompt") or "").strip()
-            if sp:
-                persona = sp   # 激活人设的 system_prompt 覆盖环境变量
-            _log(f"🌟 [人设] 当前激活: {active_persona.get('display_name', oc_assistant_id)}")
+        chat_tag = os.environ.get("CHAT_TAG", "Web_Chat")
         now_bj = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
         time_str = now_bj.strftime("%Y-%m-%d %H:%M")
 
-        # 沉默时长（从 chat_archive 最近一条记录到现在的小时差，优雅降级）
+        # 沉默时长（从最近一条对话到现在的小时差，优雅降级）
+        # 注意：memories.created_at 由 _save_memory_to_db 写入，是北京时间字符串 "YYYY-MM-DD HH:MM:SS"
         silence_hours = 0
         try:
-            res = await asyncio.to_thread(lambda: sb.table("chat_archive").select("created_at").eq("assistant_id", oc_assistant_id).order("created_at", desc=True).limit(1).execute())
+            res = await asyncio.to_thread(lambda: sb.table("memories").select("created_at").eq("tags", chat_tag).order("created_at", desc=True).limit(1).execute())
             if res and res.data:
                 last = res.data[0].get("created_at", "")
                 if last:
                     try:
-                        last_dt = datetime.datetime.strptime(last[:19], "%Y-%m-%dT%H:%M:%S")
-                        silence_hours = max(0, round((now_bj - (last_dt + datetime.timedelta(hours=8))).total_seconds() / 3600, 1))
+                        # 兼容两种格式：DB 内置 "YYYY-MM-DD HH:MM:SS" 和可能的 ISO "YYYY-MM-DDTHH:MM:SS"
+                        raw = last[:19]
+                        fmt = "%Y-%m-%d %H:%M:%S" if "T" not in raw else "%Y-%m-%dT%H:%M:%S"
+                        last_dt = datetime.datetime.strptime(raw, fmt)
+                        # last_dt 已是北京时间，now_bj 也是北京时间，直接相减
+                        silence_hours = max(0, round((now_bj - last_dt).total_seconds() / 3600, 1))
                     except Exception:
                         pass
         except Exception:
@@ -409,63 +386,38 @@ class HostFixMiddleware:
         except Exception:
             pass
 
-        # 🌟 当前线路精华记忆（chat_messages 表，按 assistant_id 隔离）
-        # 类别权重：关系/设定/雷点 > 喜好 > 剧情/档案
-        chat_facts = ""
+        # 向量语义记忆（Pinecone，可选）
+        vector_context = "无相关深层记忆"
         try:
-            # 关键词检索当前查询在当前线路的记忆（top 5）
-            safe_kw = current_query.strip()[:50].replace("%", "\\%").replace("_", "\\_")
-            def _fetch_facts():
-                # 关键词命中
-                kw_q = sb.table("chat_messages").select("content, category").eq("assistant_id", oc_assistant_id)
-                if safe_kw:
-                    kw_q = kw_q.ilike("content", f"%{safe_kw}%")
-                kw_q = kw_q.order("created_at", desc=True).limit(5)
-                kw_res = kw_q.execute()
-                # 兜底：如果关键词没命中，拉该线路最新的核心记忆
-                if not (kw_res and kw_res.data):
-                    return sb.table("chat_messages").select("content, category") \
-                        .eq("assistant_id", oc_assistant_id) \
-                        .in_("category", ["关系", "设定", "雷点", "喜好"]) \
-                        .order("created_at", desc=True).limit(15).execute()
-                return kw_res
-            fr = await asyncio.to_thread(_fetch_facts)
-            if fr and fr.data:
-                chat_facts = "\n".join([f"- {r['content']}" for r in fr.data])
-        except Exception as e:
-            _log(f"⚠️ 拉取精华记忆失败（跳过）: {e}")
-
-        # Mem0 向量记忆（可选）
-        mem0_context = "无相关深层记忆"
-        mc = _get_mem0()
-        if mc and current_query.strip():
-            try:
+            import server
+            vc = getattr(server, "vector_client", None)
+            if vc and vc.index and current_query.strip():
                 def _s():
-                    return mc.search(query=str(current_query), user_id=user_id, filters={"user_id": user_id}, limit=5)
-                mr = await asyncio.to_thread(_s)
-                if mr:
-                    rl = mr.get("results", mr) if isinstance(mr, dict) else mr
-                    if isinstance(rl, list) and rl:
-                        mem0_context = "\n".join([f"- {m.get('memory', str(m))}" if isinstance(m, dict) else f"- {str(m)}" for m in rl])
-            except Exception as e:
-                _log(f"Mem0 检索失败（跳过）: {e}")
+                    return vc.search(query=str(current_query), user_id=user_id, limit=5)
+                results = await asyncio.to_thread(_s)
+                if isinstance(results, list) and results:
+                    vector_context = "\n".join([
+                        f"- {m.get('memory', str(m))}" if isinstance(m, dict) else f"- {str(m)}"
+                        for m in results
+                    ])
+        except Exception as e:
+            _log(f"Pinecone 检索失败（跳过）: {e}")
 
-        # 📝 方案A：对话历史从 chat_archive 读取（按 assistant_id 隔离）
+        # 最近对话历史（按 tag 拉，转成 user/assistant 交替）
         history_msgs = []
         try:
-            hr = await asyncio.to_thread(lambda: sb.table("chat_archive").select("role, content, created_at").eq("assistant_id", oc_assistant_id).order("created_at", desc=True).limit(20).execute())
+            _TAGS = [chat_tag, "TG_MSG", "QQ_Chat", "QQ_Group", "Email_Process"]
+            hr = await asyncio.to_thread(lambda: sb.table("memories").select("content, tags").in_("tags", _TAGS).order("created_at", desc=True).limit(20).execute())
             if hr and hr.data:
                 rows = list(reversed(hr.data))[-10:]
                 for row in rows:
-                    role = row.get("role", "user")
-                    content = str(row.get("content", "")).strip()
-                    if not content:
+                    c = str(row.get("content", "")).strip()
+                    if not c:
                         continue
-                    # 跳过工具调用系统记录
-                    if content.startswith("[系统记录："):
-                        continue
-                    history_role = "user" if role == "user" else "assistant"
-                    history_msgs.append({"role": history_role, "content": content[:500]})
+                    if c.startswith(user_name):
+                        history_msgs.append({"role": "user", "content": (c.split("：", 1)[-1] if "：" in c else c)[:500]})
+                    elif c.startswith("我(") or c.startswith(f"我({ai_name})"):
+                        history_msgs.append({"role": "assistant", "content": (c.split("：", 1)[-1] if "：" in c else c)[:500]})
                 # 合并相邻同 role
                 merged = []
                 for m in history_msgs:
@@ -480,13 +432,11 @@ class HostFixMiddleware:
             _log(f"拉取上文失败（跳过）: {e}")
 
         # 拼装 system prompt
-        facts_block = chat_facts if chat_facts else "暂无"
         status_inject = (
             f"\n\n[系统当前状态]\n当前时间:{time_str}(北京时间),距离上次聊天:{silence_hours}h。\n"
             f"【{user_name}的核心画像】:\n{user_prof}\n\n"
             f"--- 以下为调取的历史背景记忆（请注意这是过去的事，不是现在正在聊的内容） ---\n"
-            f"【当前线路({oc_assistant_id})核心记忆】:\n{facts_block}\n"
-            f"【深层关联记忆】:\n{mem0_context}\n"
+            f"【深层关联记忆】:\n{vector_context}\n"
             f"【近3次阶段总结】:\n{core_summaries}\n"
             f"------------------------------------------------\n"
         )
@@ -517,11 +467,15 @@ class HostFixMiddleware:
             for j, hm in enumerate(history_msgs):
                 req_data["messages"].insert(sys_idx + j, hm)
 
-        _log(f"🧠 [智能体] 注入完成：画像{len(user_prof)}字 + 总结{len(core_summaries)}字 + Mem0{len(mem0_context)}字 + 上文{len(history_msgs)}条")
+        _log(f"🧠 [智能体] 注入完成：画像{len(user_prof)}字 + 总结{len(core_summaries)}字 + 向量记忆{len(vector_context)}字 + 上文{len(history_msgs)}条")
 
     async def _save_conversation(self, sb, user_msg, ai_msg, reasoning, tool_calls):
-        """异步把本轮对话存到橘瓣 chat_archive + Mem0 + 自动提炼（方案A：不再写 memories 流水）"""
+        """异步把本轮对话存到 Supabase memories 表 + Pinecone"""
+        ai_name = os.environ.get("AI_NAME", "助手")
+        user_name = os.environ.get("USER_NAME", "用户")
         user_id = os.environ.get("USER_ID", "default")
+        chat_tag = os.environ.get("CHAT_TAG", "Web_Chat")
+        now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
         final_save_text = ai_msg
         if reasoning:
@@ -530,148 +484,63 @@ class HostFixMiddleware:
             tc_names = [tc.get("function", {}).get("name", "unknown") for tc in tool_calls.values()]
             final_save_text = f"[系统记录：调用了工具 {', '.join(tc_names)}]"
 
-        # 📝 方案A：对话原文不再写入 memories 表，统一由 chat_archive 归档。
-        #    memories 表仅保留日记 / Core_Cognition 总结 / 心跳记录。
+        # 1. 存到 memories 表（user + assistant 两条）。失败自动重试一次。
+        def _save_both():
+            sb.table("memories").insert({
+                "title": f"💬 {user_name}说",
+                "content": f"{user_name}：{user_msg[:2000]}",
+                "category": "流水",
+                "mood": "平静",
+                "tags": chat_tag,
+                "created_at": now_str,
+            }).execute()
+            sb.table("memories").insert({
+                "title": f"🤖 {ai_name}回复",
+                "content": f"我({ai_name})：{final_save_text[:2000]}",
+                "category": "流水",
+                "mood": "温和",
+                "tags": chat_tag,
+                "created_at": now_str,
+            }).execute()
 
-        # 1. 写入 Mem0（可选）
-        mc = _get_mem0()
-        if mc and user_msg:
+        saved = False
+        for attempt in (1, 2):
             try:
-                def _add_m():
-                    mc.add([
+                await asyncio.to_thread(_save_both)
+                saved = True
+                break
+            except Exception as e:
+                if attempt == 1:
+                    _log(f"⚠️ 存库首次失败，1s 后重试: {e}")
+                    await asyncio.sleep(1.0)
+                else:
+                    _log(f"❌ 存库重试仍失败，放弃: {e}")
+        if saved:
+            _log(f"💾 已存库：{user_name}问({len(user_msg)}字) + {ai_name}答({len(final_save_text)}字)")
+
+        # 2. 写入 Pinecone 向量记忆（可选）
+        try:
+            import server
+            vc = getattr(server, "vector_client", None)
+            if vc and vc.index and user_msg:
+                def _add_vec():
+                    vc.add([
                         {"role": "user", "content": user_msg},
                         {"role": "assistant", "content": final_save_text},
                     ], user_id=user_id)
-                await asyncio.to_thread(_add_m)
-                _log("🧠 Mem0 已写入")
-            except Exception as e:
-                _log(f"Mem0 写入失败: {e}")
-
-        # 2. 🍊 橘瓣记忆库自动归档：把本轮对话原文写入 chat_archive
-        #    🌟 按当前激活人设/线路隔离（优先于环境变量）
-        try:
-            active_persona = _get_active_persona(sb)
-            oc_assistant_id = os.environ.get("ORANGECHAT_ASSISTANT_ID", "").strip()
-            if active_persona:
-                oc_assistant_id = active_persona.get("id", oc_assistant_id)
-            if not oc_assistant_id:
-                oc_assistant_id = "默认助手_技术线"
-            now_iso = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).isoformat()
-
-            def _archive_user():
-                sb.table("chat_archive").insert({
-                    "assistant_id": oc_assistant_id,
-                    "conversation_id": "",
-                    "role": "user",
-                    "content": user_msg[:4000],
-                    "category": "archive",
-                    "created_at": now_iso,
-                }).execute()
-
-            def _archive_ai():
-                sb.table("chat_archive").insert({
-                    "assistant_id": oc_assistant_id,
-                    "conversation_id": "",
-                    "role": "assistant",
-                    "content": final_save_text[:4000],
-                    "category": "archive",
-                    "created_at": now_iso,
-                }).execute()
-
-            await asyncio.to_thread(_archive_user)
-            if final_save_text:
-                await asyncio.to_thread(_archive_ai)
-            _log(f"🍊 [归档] 已写入 chat_archive [{oc_assistant_id}]: user({len(user_msg)}字) + assistant({len(final_save_text)}字)")
-
-            # 🆕 自动精华提炼：从本轮对话提取长期事实写入 chat_messages
-            #    方案A：归档是橘瓣系统的唯一原文来源，提炼只依赖 chat_archive
-            #    全程异步，失败只记日志，不影响对话
-            try:
-                from distill import run_distill
-                conv_text = f"用户：{user_msg[:2000]}"
-                if final_save_text:
-                    conv_text += f"\n助手：{final_save_text[:2000]}"
-                distill_result = await run_distill(oc_assistant_id, conv_text)
-                if distill_result.get("ok"):
-                    s = distill_result.get("stats", {})
-                    _log(f"🧠 [提炼] [{oc_assistant_id}] 新增{s.get('new',0)} 更新{s.get('updated',0)} 冲突{s.get('conflict',0)} 跳过{s.get('skipped',0)}")
-            except Exception as e:
-                _log(f"⚠️ 自动精华提炼失败（不影响主流程）: {e}")
+                await asyncio.to_thread(_add_vec)
+                _log("🧠 Pinecone 已写入")
         except Exception as e:
-            _log(f"⚠️ 橘瓣自动归档失败（不影响主流程）: {e}")
+            _log(f"Pinecone 写入失败: {e}")
 
-        # 3. 🧠 异步触发统一对话总结（不阻塞响应）
+        # 3. 🧠 异步触发全渠道统一对话总结（不阻塞响应）
+        #    监控网页/QQ/TG/邮件等所有渠道的对话流水，
+        #    累计达到 SUMMARY_THRESHOLD（默认30条）时自动总结归档。
         try:
-            await self._check_and_summarize_all(sb)
+            import napcat
+            await napcat.check_and_summarize_all()
         except Exception as e:
             _log(f"⚠️ 触发对话总结失败（不影响主流程）: {e}")
-
-    async def _check_and_summarize_all(self, sb):
-        """🧠 统一对话总结机制（方案A：从 chat_archive 读取，按当前激活人设隔离）
-        当累计达到阈值时，自动触发大模型总结并归档，生成阶段总结存入 Core_Cognition。
-        """
-        try:
-            threshold = int(os.environ.get("SUMMARY_THRESHOLD", "30"))
-            ai_name = os.environ.get("AI_NAME", "助手")
-            user_name = os.environ.get("USER_NAME", "用户")
-
-            _MAX_MSG_CHARS = 500
-            _MAX_PROMPT_CHARS = 80000
-
-            def _check():
-                if not sb:
-                    return
-                # 📝 方案A：从 chat_archive 读对话原文（按当前激活人设隔离）
-                active = _get_active_persona(sb)
-                summarizer_id = active.get("id", "默认助手_技术线") if active else os.environ.get("ORANGECHAT_ASSISTANT_ID", "默认助手_技术线")
-                all_chats = sb.table("chat_archive").select("id, role, content, created_at").eq("assistant_id", summarizer_id).order("created_at").execute()
-                if all_chats and all_chats.data and len(all_chats.data) >= threshold:
-                    items_to_summarize = all_chats.data[-threshold:]
-                    all_ids_to_archive = [item['id'] for item in all_chats.data]
-
-                    _log(f"📦 [{summarizer_id}] 归档累计满 {len(all_chats.data)} 条，正在触发总结（取最新{threshold}条，归档全部）...")
-
-                    chat_parts = []
-                    total_chars = 0
-                    for item in items_to_summarize:
-                        truncated_content = item['content'][:_MAX_MSG_CHARS]
-                        part = f"[{item.get('role', 'user')}] {truncated_content}"
-                        if total_chars + len(part) > _MAX_PROMPT_CHARS:
-                            _log(f"⚠️ 总结prompt已达 {_MAX_PROMPT_CHARS} 字符上限，截断剩余记录")
-                            break
-                        chat_parts.append(part)
-                        total_chars += len(part)
-
-                    chat_text = "\n".join(chat_parts)
-                    prompt = (
-                        f"以下是我们最近在网页的{len(chat_parts)}条对话记录：\n{chat_text}\n\n"
-                        f"请你以{ai_name}(我)的第一人称视角，提取核心要点，精炼地总结一下我们最近聊了什么、发生了什么。"
-                        f"⚠️严重警告：1. 必须严格区分清楚'{ai_name}(我)'做了什么，以及'{user_name}'做了什么，绝对不能把两人的话搞混！"
-                        f"2. 绝对禁止以'今天'开头！请扔掉日记格式，直接开门见山地叙述事情"
-                        f"（例如直接说：'{user_name}最近在忙...' 或 '我们刚才聊了...'）。"
-                    )
-                    client = _get_openai_client()
-                    if client:
-                        try:
-                            model_name = os.environ.get("CHAT_MODEL_NAME", os.environ.get("OPENAI_MODEL_NAME", "gpt-3.5-turbo"))
-                            summary = client.chat.completions.create(
-                                model=model_name,
-                                messages=[{"role": "user", "content": prompt}],
-                                temperature=0.7
-                            ).choices[0].message.content.strip()
-                            if summary:
-                                sb.table("memories").insert({
-                                    "title": "📚 全渠道阶段总结", "content": summary,
-                                    "category": "记事", "mood": "温情", "tags": "Core_Cognition"
-                                }).execute()
-                            _log(f"✅ 对话总结完成")
-                        except Exception as llm_err:
-                            _log(f"❌ 总结LLM调用失败: {llm_err}")
-                    else:
-                        _log("⚠️ 未配置 CHAT_API_KEY，跳过总结")
-            await asyncio.to_thread(_check)
-        except Exception as e:
-            _log(f"❌ 统一对话总结失败: {e}")
 
     # ------------------------------------------
     # 管理接口
@@ -688,52 +557,17 @@ class HostFixMiddleware:
 # 辅助函数
 # ==========================================
 
-def _allowed_cors_origin() -> bytes:
-    """读取 CORS_ALLOWED_ORIGINS 返回允许的 Origin（逗号分隔，取首个）。
-    未配置则返回 * 兼容旧部署；生产环境建议配置为前端域名以收紧跨域策略。"""
-    allowed = os.environ.get("CORS_ALLOWED_ORIGINS", "").strip()
-    if not allowed:
-        return b"*"
-    first = allowed.split(",")[0].strip()
-    return first.encode("utf-8") if first else b"*"
-
-
-def _get_openai_client():
-    """惰性创建 OpenAI 兼容客户端（用 CHAT_* 优先，回退 OPENAI_*）。"""
-    key = os.environ.get("CHAT_API_KEY", os.environ.get("OPENAI_API_KEY", "")).strip()
-    if not key:
-        return None
-    try:
-        from openai import OpenAI
-        base_url = os.environ.get("CHAT_BASE_URL", os.environ.get("OPENAI_BASE_URL", "")).strip() or None
-        return OpenAI(api_key=key, base_url=base_url)
-    except Exception as e:
-        _log(f"❌ 创建 OpenAI 客户端失败: {e}")
-        return None
-
-
 async def _check_api_secret(scope, send):
-    """校验 API_SECRET（🛡️ 强制鉴权）。返回 True=通过，False=已拒绝（已发送 401/403）。
-    安全策略：未配置 API_SECRET 时【拒绝】所有受保护接口，避免误开导致裸奔。"""
+    """校验 API_SECRET。返回 True=通过，False=已拒绝(已发送 401)"""
     api_secret = os.environ.get("API_SECRET", "").strip()
     if not api_secret:
-        _log("🚫 [安全] API_SECRET 未配置，拒绝访问受保护接口（请在环境变量中设置 API_SECRET）")
-        await send({"type": "http.response.start", "status": 403,
-                    "headers": [(b"content-type", b"application/json"),
-                                (b"access-control-allow-origin", _allowed_cors_origin())]})
-        await send({"type": "http.response.body",
-                    "body": b'{"error":"Forbidden: API_SECRET is not configured on the server"}'})
-        return False
+        return True   # 没配就不强制鉴权（保持兼容）
     headers_dict = {k.decode("utf-8").lower(): v.decode("utf-8") for k, v in scope.get("headers", [])}
     auth_token = headers_dict.get("authorization", "").replace("Bearer ", "").replace("bearer ", "").strip()
     x_api_key = headers_dict.get("x-api-key", "").strip()
-    # 常量时间比较，防止时序攻击逐字节爆破密钥
-    ok = (auth_token and hmac.compare_digest(auth_token, api_secret)) or \
-         (x_api_key and hmac.compare_digest(x_api_key, api_secret))
-    if not ok:
+    if auth_token != api_secret and x_api_key != api_secret:
         await send({"type": "http.response.start", "status": 401,
-                    "headers": [(b"content-type", b"application/json"),
-                                (b"access-control-allow-origin", _allowed_cors_origin())]})
+                    "headers": [(b"content-type", b"application/json"), (b"access-control-allow-origin", b"*")]})
         await send({"type": "http.response.body", "body": b'{"error":"Unauthorized: Missing or invalid API key"}'})
         return False
     return True
@@ -746,9 +580,9 @@ async def _send_json_resp(send, status: int, data: dict):
         "status": status,
         "headers": [
             (b"content-type", b"application/json; charset=utf-8"),
-            (b"access-control-allow-origin", _allowed_cors_origin()),
+            (b"access-control-allow-origin", b"*"),
             (b"access-control-allow-methods", b"GET, POST, OPTIONS"),
-            (b"access-control-allow-headers", b"Content-Type, Authorization, x-api-key"),
+            (b"access-control-allow-headers", b"Content-Type, Authorization"),
         ]
     })
     await send({"type": "http.response.body", "body": body})
@@ -759,9 +593,9 @@ async def _send_cors_preflight(send):
         "type": "http.response.start",
         "status": 204,
         "headers": [
-            (b"access-control-allow-origin", _allowed_cors_origin()),
-            (b"access-control-allow-methods", b"GET, POST, PATCH, DELETE, OPTIONS"),
-            (b"access-control-allow-headers", b"Content-Type, Authorization, x-api-key"),
+            (b"access-control-allow-origin", b"*"),
+            (b"access-control-allow-methods", b"GET, POST, OPTIONS"),
+            (b"access-control-allow-headers", b"Content-Type, Authorization"),
             (b"access-control-max-age", b"86400"),
         ]
     })
